@@ -35,6 +35,16 @@ type Snapshot struct {
 	Alerts      []string        `json:"alerts"`
 }
 
+// Triggers are the on-demand jobs the dashboard can fire. Each callback is
+// expected to be safe to invoke concurrently with the scheduled cron jobs;
+// the implementation lives in cmd/ssm (so the HTTP layer doesn't have to
+// import the scanner/aireview packages directly).
+type Triggers struct {
+	Scan     func(context.Context)
+	AIReview func(context.Context)
+	Digest   func(context.Context)
+}
+
 // Server hosts the HTTP API and dashboard. It is safe for concurrent use; the
 // scanner goroutine calls SetSnapshot whenever a new scan completes.
 type Server struct {
@@ -42,18 +52,31 @@ type Server struct {
 	password string // shared password; empty disables auth (LAN-trusted mode)
 	llm      *llm.Client
 	store    *store.Store // used by /api/ask to enrich the prompt with history
+	trig     Triggers
 
-	mu   sync.RWMutex
-	snap Snapshot
+	mu       sync.RWMutex
+	snap     Snapshot
+	// running guards each trigger kind so a button mash doesn't queue
+	// several scans on top of each other.
+	running  map[string]bool
+	runningM sync.Mutex
 }
 
 // New builds a Server. The store enables /api/ask to feed the model recent
 // growth trends and prior decisions in addition to the live snapshot.
 // password may be empty to disable auth entirely (only safe on a fully
 // trusted network). The LLM client may be nil; /api/ask will return an error
-// in that case rather than panicking.
-func New(listen, password string, llmClient *llm.Client, st *store.Store) *Server {
-	return &Server{listen: listen, password: password, llm: llmClient, store: st}
+// in that case rather than panicking. Triggers wire the dashboard's manual
+// "run now" buttons to the corresponding job; nil fields disable the button.
+func New(listen, password string, llmClient *llm.Client, st *store.Store, trig Triggers) *Server {
+	return &Server{
+		listen:   listen,
+		password: password,
+		llm:      llmClient,
+		store:    st,
+		trig:     trig,
+		running:  map[string]bool{},
+	}
 }
 
 // SetSnapshot atomically replaces the in-memory snapshot. Called by the
@@ -72,6 +95,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/", s.auth(s.handleDashboard))
 	mux.HandleFunc("/api/summary", s.auth(s.handleSummary))
 	mux.HandleFunc("/api/ask", s.auth(s.handleAsk))
+	mux.HandleFunc("/api/trigger/scan", s.auth(s.triggerHandler("scan", s.trig.Scan)))
+	mux.HandleFunc("/api/trigger/ai-review", s.auth(s.triggerHandler("ai_review", s.trig.AIReview)))
+	mux.HandleFunc("/api/trigger/digest", s.auth(s.triggerHandler("digest", s.trig.Digest)))
 	mux.HandleFunc("/login", s.handleLogin)
 	mux.HandleFunc("/logout", s.handleLogout)
 	mux.HandleFunc("/healthz", s.handleHealth)
@@ -136,6 +162,44 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	renderLogin(w, "")
+}
+
+// triggerHandler returns an HTTP handler that runs `fn` in the background
+// when called. Each (kind) is guarded against concurrent runs so repeated
+// clicks don't pile up jobs. Responds immediately:
+//   - 202 {"status":"started"} when the job kicks off
+//   - 409 {"status":"busy"}    when the same kind is already running
+//   - 503 when the trigger isn't wired (e.g. LLM disabled)
+func (s *Server) triggerHandler(kind string, fn func(context.Context)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		if fn == nil {
+			writeJSON(w, http.StatusServiceUnavailable,
+				map[string]string{"error": kind + " not available"})
+			return
+		}
+		s.runningM.Lock()
+		if s.running[kind] {
+			s.runningM.Unlock()
+			writeJSON(w, http.StatusConflict, map[string]string{"status": "busy"})
+			return
+		}
+		s.running[kind] = true
+		s.runningM.Unlock()
+
+		go func() {
+			defer func() {
+				s.runningM.Lock()
+				delete(s.running, kind)
+				s.runningM.Unlock()
+			}()
+			fn(context.Background())
+		}()
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "started", "kind": kind})
+	}
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

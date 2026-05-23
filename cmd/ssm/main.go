@@ -99,15 +99,45 @@ func main() {
 		rules.GrowthPct = cfg.Alerts.GrowthPct
 	}
 
-	srv := api.New(cfg.HTTP.Listen, cfg.HTTP.Password, llmClient, st)
-	if cfg.HTTP.Password == "" {
-		log.Printf("WARNING: http.password is empty — dashboard is unauthenticated")
-	}
-
 	ctx, cancel := signalContext()
 	defer cancel()
 
 	reviewer := aireview.New(llmClient, st, notifier)
+
+	// Build the Server with manual-trigger callbacks wired to the same
+	// functions the cron scheduler invokes. We construct the *Server later
+	// (after triggers point at it for SetSnapshot) by deferring the call to
+	// runScan through a closure that captures srv.
+	var srv *api.Server
+	triggers := api.Triggers{
+		Scan: func(c context.Context) { runScan(c, cfg, st, host, dock, srv, notifier, rules) },
+		AIReview: func(c context.Context) {
+			if reviewer.LLM == nil {
+				log.Printf("manual ai_review skipped: llm disabled")
+				return
+			}
+			findings, err := reviewer.RunReview(c)
+			if err != nil {
+				log.Printf("manual ai_review: %v", err)
+				return
+			}
+			log.Printf("manual ai_review fired %d findings", len(findings))
+		},
+		Digest: func(c context.Context) {
+			if reviewer.LLM == nil {
+				log.Printf("manual digest skipped: llm disabled")
+				return
+			}
+			if _, err := reviewer.RunDigest(c); err != nil {
+				log.Printf("manual digest: %v", err)
+			}
+		},
+	}
+	srv = api.New(cfg.HTTP.Listen, cfg.HTTP.Password, llmClient, st, triggers)
+	if cfg.HTTP.Password == "" {
+		log.Printf("WARNING: http.password is empty — dashboard is unauthenticated")
+	}
+
 	scheduler := buildScheduler(ctx, cfg, st, host, dock, srv, notifier, rules, reviewer)
 	scheduler.Start()
 	defer func() { <-scheduler.Stop().Done() }()

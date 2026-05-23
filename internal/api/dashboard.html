@@ -62,6 +62,17 @@
     </div>
 
     <div class="card">
+      <h2>Manual triggers</h2>
+      <div class="muted">Run a job on demand. Cron schedules continue to fire independently.</div>
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+        <button onclick="trigger('scan', this)">Run scan</button>
+        <button onclick="trigger('ai-review', this)">Run AI review</button>
+        <button onclick="trigger('digest', this)">Send daily digest</button>
+      </div>
+      <div id="trig-status" class="muted" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card">
       <h2>Ask the AI</h2>
       <div class="muted">The model sees the current snapshot, 7-day growth trends, and prior decisions (rule alerts + past AI reviews) when answering.</div>
       <div class="ask">
@@ -127,6 +138,26 @@ async function refresh() {
 function fill(sel, items) {
   const body = document.querySelector(sel); body.innerHTML = "";
   (items || []).forEach(x => body.appendChild(row([x.label, human(x.bytes)])));
+}
+async function trigger(kind, btn) {
+  const status = document.getElementById("trig-status");
+  btn.disabled = true;
+  status.textContent = "Starting " + kind + "…";
+  try {
+    const r = await fetch("/api/trigger/" + kind, { method: "POST" });
+    const j = await r.json();
+    if (r.status === 202) {
+      status.textContent = kind + " started — refresh in a few seconds to see results.";
+    } else if (r.status === 409) {
+      status.textContent = kind + " is already running.";
+    } else {
+      status.textContent = "Error: " + (j.error || r.status);
+    }
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+  } finally {
+    setTimeout(() => { btn.disabled = false; }, 2000);
+  }
 }
 async function ask() {
   const q = document.getElementById("q").value.trim();
