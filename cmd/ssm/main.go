@@ -174,14 +174,28 @@ func main() {
 	scheduler.Start()
 	defer func() { <-scheduler.Stop().Done() }()
 
+	// Diagnostic: report the SQLite file size at startup. Lets us tell at a
+	// glance whether the persistent volume is doing its job — a freshly-
+	// initialised DB is ~28 KB; an established one with weeks of scans is
+	// MB-sized. Sudden drops here mean the named volume isn't persisting.
+	if fi, err := os.Stat(*dbPath); err == nil {
+		log.Printf("DB %s: %d bytes (modified %s)", *dbPath, fi.Size(), fi.ModTime().Format(time.RFC3339))
+	} else {
+		log.Printf("DB %s: not present yet (%v)", *dbPath, err)
+	}
+
 	// Restore the most-recent scan from SQLite so the dashboard isn't empty
 	// for the first few minutes after a redeploy. Without this, until the
 	// startup scan completes the UI shows zero containers / zero filesystems
 	// even though the history is intact, which looks indistinguishable from
 	// data loss.
-	if samples, taken, err := st.LatestScan(); err != nil {
-		log.Printf("restore last scan: %v", err)
-	} else if len(samples) > 0 {
+	samples, taken, err := st.LatestScan()
+	switch {
+	case err != nil:
+		log.Printf("restore last scan: error %v", err)
+	case len(samples) == 0:
+		log.Printf("restore last scan: DB has no prior samples (first run or volume reset)")
+	default:
 		srv.SetSnapshot(api.Snapshot{
 			TakenAt:     taken,
 			Samples:     samples,
