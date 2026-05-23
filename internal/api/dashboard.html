@@ -16,10 +16,19 @@
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
   .card h2 { margin: 0 0 12px; font-size: 14px; color: #c9d1d9; text-transform: uppercase; letter-spacing: .5px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid #21262d; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+  th, td {
+    text-align: left;
+    padding: 6px 4px;
+    border-bottom: 1px solid #21262d;
+    /* Long, unbroken paths (volume/log names) would otherwise blow out the
+       card width. Wrap mid-string and prefer the natural break points. */
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    vertical-align: top;
+  }
   th { color: #8b949e; font-weight: 500; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; width: 90px; }
   .bar { background: #21262d; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 4px; }
   .bar > div { height: 100%; background: linear-gradient(90deg, #3fb950, #d29922 70%, #f85149 90%); }
   .alert { padding: 8px 12px; background: #3d1d1d; border: 1px solid #6e2222; border-radius: 6px; margin-bottom: 8px; font-size: 13px; }
@@ -54,6 +63,11 @@
     <div class="card">
       <h2>Top host paths</h2>
       <table id="tbl-paths"><thead><tr><th>Path</th><th class="num">Size</th></tr></thead><tbody></tbody></table>
+    </div>
+
+    <div class="card">
+      <h2>Biggest files</h2>
+      <table id="tbl-files"><thead><tr><th>Path</th><th class="num">Size</th></tr></thead><tbody></tbody></table>
     </div>
 
     <div class="card">
@@ -120,6 +134,7 @@ async function refresh() {
     fill("#tbl-logs tbody", s.top_logs);
     fill("#tbl-vols tbody", s.top_volumes);
     fill("#tbl-paths tbody", s.top_paths);
+    fill("#tbl-files tbody", s.top_files);
 
     const alertsEl = document.getElementById("alerts");
     if ((s.alerts || []).length) {

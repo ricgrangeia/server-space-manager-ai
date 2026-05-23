@@ -25,21 +25,41 @@ func NewHost(cfg *config.Config) *HostScanner {
 	}
 }
 
+// bigFilesTop is the number of largest individual files surfaced as
+// "big_file" samples each scan. Kept modest so the dashboard card stays
+// readable; tune here if a deployment needs more visibility.
+const bigFilesTop = 20
+
+// Scan walks the configured host paths, records per-directory totals, gathers
+// the N largest individual files across all paths, and emits filesystem
+// capacity samples for the configured mount points.
 func (h *HostScanner) Scan(now time.Time) []store.Sample {
 	var out []store.Sample
+	bigs := newBigFilesHeap(bigFilesTop)
+
 	for _, p := range h.Paths {
-		out = append(out, h.walkPath(p, now)...)
+		out = append(out, h.walkPath(p, now, bigs)...)
 	}
 	for _, fsPath := range h.Filesystems {
 		if s, ok := h.statFS(fsPath, now); ok {
 			out = append(out, s)
 		}
 	}
+	for _, bf := range bigs.sorted() {
+		out = append(out, store.Sample{
+			Kind:    "big_file",
+			Key:     bf.path,
+			Label:   bf.path,
+			Bytes:   bf.size,
+			TakenAt: now,
+		})
+	}
 	return out
 }
 
-// walkPath emits one sample per directory up to MaxDepth and one for the root.
-func (h *HostScanner) walkPath(p config.PathCfg, now time.Time) []store.Sample {
+// walkPath emits one sample per directory up to MaxDepth, and feeds the
+// shared big-files heap with each individual file encountered.
+func (h *HostScanner) walkPath(p config.PathCfg, now time.Time, bigs *bigFilesHeap) []store.Sample {
 	rootDepth := strings.Count(filepath.Clean(p.Path), string(filepath.Separator))
 	sizes := map[string]int64{}
 
@@ -60,6 +80,7 @@ func (h *HostScanner) walkPath(p config.PathCfg, now time.Time) []store.Sample {
 		if err != nil {
 			return nil
 		}
+		bigs.consider(path, info.Size())
 		// attribute file size to each ancestor up to max_depth
 		dir := filepath.Dir(path)
 		for {

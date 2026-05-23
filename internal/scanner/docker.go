@@ -89,6 +89,9 @@ type containerSummary struct {
 type containerMount struct {
 	Type   string `json:"Type"`
 	Source string `json:"Source"`
+	// Name is set for Type=="volume" mounts; we use it to mark named
+	// volumes as "in use" while iterating containers.
+	Name string `json:"Name"`
 }
 
 // containerInspect carries the LogPath field needed to sum log sizes.
@@ -127,6 +130,10 @@ type duVolumeUsage struct {
 func (d *DockerScanner) Scan(ctx context.Context, now time.Time) []store.Sample {
 	var out []store.Sample
 
+	// volumesInUse is filled during the container loop below so we can
+	// distinguish "in use" from "orphan" when listing volumes afterwards.
+	volumesInUse := map[string]struct{}{}
+
 	var containers []containerSummary
 	if err := d.get(ctx, "/containers/json?all=true", &containers); err == nil {
 		for _, c := range containers {
@@ -143,58 +150,96 @@ func (d *DockerScanner) Scan(ctx context.Context, now time.Time) []store.Sample 
 					})
 				}
 			}
+			for _, m := range c.Mounts {
+				if m.Type == "volume" && m.Name != "" {
+					volumesInUse[m.Name] = struct{}{}
+				}
+			}
 			if d.cfg.TrackBindMounts {
 				for _, m := range c.Mounts {
-					if m.Type != "bind" {
+					if m.Type != "bind" || skipBindSource(m.Source) {
 						continue
 					}
-					if size, ok := dirSize(m.Source); ok {
-						out = append(out, store.Sample{
-							Kind: "bind_mount", Key: c.ID + ":" + m.Source,
-							Label: name + " -> " + m.Source,
-							Bytes: size, Extra: extra, TakenAt: now,
-						})
+					// Read through the host-mount view first (/host<src>) so
+					// we measure the actual host path via our read-only mount,
+					// not whatever happens to exist at that path inside ssm's
+					// own namespace. Fall back to the raw path for the case
+					// where ssm runs directly on the host without /host.
+					size, ok := dirSize("/host" + m.Source)
+					if !ok {
+						size, ok = dirSize(m.Source)
 					}
+					if !ok {
+						continue
+					}
+					out = append(out, store.Sample{
+						Kind: "bind_mount", Key: c.ID + ":" + m.Source,
+						Label: name + " -> " + m.Source,
+						Bytes: size, Extra: extra, TakenAt: now,
+					})
 				}
 			}
 		}
 	}
 
-	if d.cfg.TrackVolumes || d.cfg.TrackImages {
+	if d.cfg.TrackVolumes {
+		// /system/df returns UsageData: null for volumes on newer Docker
+		// engines (the walk is expensive and skipped by default). Instead
+		// we enumerate names via /volumes and compute sizes ourselves by
+		// walking /host/var/lib/docker/volumes/<name>/_data, which is
+		// already reachable through our read-only host mount.
+		var vols struct {
+			Volumes []struct {
+				Name       string `json:"Name"`
+				Driver     string `json:"Driver"`
+				Mountpoint string `json:"Mountpoint"`
+			} `json:"Volumes"`
+		}
+		if err := d.get(ctx, "/volumes", &vols); err == nil {
+			for _, v := range vols.Volumes {
+				// Prefer the path the daemon reports; fall back to the
+				// conventional layout if Mountpoint is unset.
+				mp := v.Mountpoint
+				if mp == "" {
+					mp = "/var/lib/docker/volumes/" + v.Name + "/_data"
+				}
+				size, ok := dirSize("/host" + mp)
+				if !ok {
+					size, _ = dirSize(mp)
+				}
+				_, inUse := volumesInUse[v.Name]
+				kind := "volume"
+				if !inUse {
+					kind = "orphan_volume"
+				}
+				ex, _ := json.Marshal(map[string]any{
+					"in_use": inUse, "driver": v.Driver,
+				})
+				out = append(out, store.Sample{
+					Kind: kind, Key: v.Name, Label: v.Name,
+					Bytes: size, Extra: string(ex), TakenAt: now,
+				})
+			}
+		}
+	}
+
+	if d.cfg.TrackImages {
+		// /system/df's Images section *does* reliably include sizes, so
+		// we still use it for image accounting.
 		var du diskUsage
 		if err := d.get(ctx, "/system/df", &du); err == nil {
-			if d.cfg.TrackVolumes {
-				for _, v := range du.Volumes {
-					size, refs := int64(0), int64(-1)
-					if v.UsageData != nil {
-						size = v.UsageData.Size
-						refs = v.UsageData.RefCount
-					}
-					ex, _ := json.Marshal(map[string]any{"refs": refs, "driver": v.Driver})
-					kind := "volume"
-					if refs == 0 {
-						kind = "orphan_volume"
-					}
-					out = append(out, store.Sample{
-						Kind: kind, Key: v.Name, Label: v.Name,
-						Bytes: size, Extra: string(ex), TakenAt: now,
-					})
+			for _, img := range du.Images {
+				tag := "<none>"
+				if len(img.RepoTags) > 0 {
+					tag = img.RepoTags[0]
 				}
-			}
-			if d.cfg.TrackImages {
-				for _, img := range du.Images {
-					tag := "<none>"
-					if len(img.RepoTags) > 0 {
-						tag = img.RepoTags[0]
-					}
-					ex, _ := json.Marshal(map[string]any{
-						"shared": img.SharedSize, "containers": img.Containers,
-					})
-					out = append(out, store.Sample{
-						Kind: "image", Key: img.ID, Label: tag,
-						Bytes: img.Size, Extra: string(ex), TakenAt: now,
-					})
-				}
+				ex, _ := json.Marshal(map[string]any{
+					"shared": img.SharedSize, "containers": img.Containers,
+				})
+				out = append(out, store.Sample{
+					Kind: "image", Key: img.ID, Label: tag,
+					Bytes: img.Size, Extra: string(ex), TakenAt: now,
+				})
 			}
 		}
 	}
@@ -223,6 +268,23 @@ func (d *DockerScanner) get(ctx context.Context, path string, into any) error {
 		return fmt.Errorf("docker %s: status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return json.NewDecoder(resp.Body).Decode(into)
+}
+
+// skipBindSource returns true for bind-mount sources that produce nonsense
+// or runaway walks if we try to size them:
+//   - "/" mounts (typical for tools like ssm itself that need host
+//     visibility — walking re-enters /host and counts overlay layers many
+//     times, producing absurd byte totals).
+//   - Kernel pseudo-filesystems (/proc, /sys, /dev) — not real bytes.
+//   - The Docker socket file itself.
+func skipBindSource(src string) bool {
+	switch src {
+	case "", "/", "/proc", "/sys", "/dev", "/var/run/docker.sock", "/run/docker.sock":
+		return true
+	}
+	return strings.HasPrefix(src, "/proc/") ||
+		strings.HasPrefix(src, "/sys/") ||
+		strings.HasPrefix(src, "/dev/")
 }
 
 func firstName(names []string) string {

@@ -469,6 +469,7 @@ type summaryResp struct {
 	TopVolumes  []summaryItem `json:"top_volumes"`
 	TopPaths    []summaryItem `json:"top_paths"`
 	TopImages   []summaryItem `json:"top_images"`
+	TopFiles    []summaryItem `json:"top_files"`
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, _ *http.Request) {
@@ -484,6 +485,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, _ *http.Request) {
 		TopVolumes:  topN(snap.Samples, "volume", 10),
 		TopPaths:    topN(snap.Samples, "host_path", 10),
 		TopImages:   topN(snap.Samples, "image", 10),
+		TopFiles:    topN(snap.Samples, "big_file", 15),
 	}
 	for _, x := range snap.Samples {
 		if x.Kind != "fs" {
