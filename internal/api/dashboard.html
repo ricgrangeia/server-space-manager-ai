@@ -16,7 +16,12 @@
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
   .card h2 { margin: 0 0 12px; font-size: 14px; color: #c9d1d9; text-transform: uppercase; letter-spacing: .5px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+  /* Auto layout (not fixed) so the size column shrinks to its content and
+     the name column gets all the remaining width. The `width:1%` + nowrap
+     trick on .num below combined with overflow-wrap: anywhere on the name
+     cells gives us "label wraps, size stays one line" without manually
+     tuning widths per card. */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td {
     text-align: left;
     padding: 6px 4px;
@@ -28,7 +33,17 @@
     vertical-align: top;
   }
   th { color: #8b949e; font-weight: 500; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; width: 90px; }
+  /* Size column: keep it as narrow as the largest "999.9 GB" needs, so the
+     adjacent name column gets the rest of the card width. white-space:
+     nowrap + a 1% width is the standard CSS trick to shrink a fixed-layout
+     column to its content. */
+  th.num, td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    width: 1%;
+    padding-left: 12px;
+  }
   .bar { background: #21262d; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 4px; }
   .bar > div { height: 100%; background: linear-gradient(90deg, #3fb950, #d29922 70%, #f85149 90%); }
   .alert { padding: 8px 12px; background: #3d1d1d; border: 1px solid #6e2222; border-radius: 6px; margin-bottom: 8px; font-size: 13px; }
