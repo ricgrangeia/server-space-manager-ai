@@ -55,6 +55,13 @@ services:
       - ai-network
     security_opt:
       - no-new-privileges:true
+    # Cap our own log footprint. A space manager that itself fills the disk
+    # would be embarrassing.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 volumes:
   ssm-data:
