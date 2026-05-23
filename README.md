@@ -1,93 +1,165 @@
 # Server Space Manager
 
+A small, long-running Go daemon that watches disk usage on a Docker host —
+containers, logs, volumes, images, bind mounts, and arbitrary host paths —
+and lets you ask a **local LLM** (vLLM, Ollama, anything OpenAI-compatible)
+what to clean up. Threshold breaches can fan out to **Telegram**.
 
+Built to live on a Portainer git stack, alongside your existing vLLM.
 
-## Getting started
+> **Status:** early. The API and config shape may still change before `v1.0`.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+---
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## Features
 
-## Add your files
+- **Read-only by design.** The manager never deletes, rotates, or modifies
+  anything. It reports; you act.
+- **Docker-aware.** Container log sizes, bind-mount sizes, per-volume usage
+  (including orphaned volumes), per-image footprint, all via a read-only
+  socket proxy.
+- **Host-aware.** Configurable filesystem walks with depth caps and ignore
+  globs. Per-mountpoint capacity tracking via `statfs`.
+- **Trend history.** Every scan is persisted to SQLite (pure Go, no CGO);
+  growth-since queries power "what blew up this week?" alerts.
+- **Local LLM Q&A.** The dashboard's *Ask the AI* panel forwards a compact
+  snapshot to your local model and shows the answer. Snapshot is pre-
+  aggregated to top-N per kind so it fits comfortably in an 8k context.
+- **AI review on a cron.** Periodically (default every 6h), the model is shown
+  recent growth trends, **per-item baseline anomalies** (last-24h growth vs
+  that item's own 7-day average), and the filesystem capacity table, then
+  asked to nominate items worth alerting on — the things static thresholds
+  miss. Output is constrained to JSON whose keys must exist in the snapshot,
+  so hallucinated container/volume names are dropped.
+- **Baseline anomaly detection.** SQLite tracks per-item growth, so the
+  system knows each container's, volume's, and folder's *normal* daily rate.
+  When something spikes to >=3× its own baseline (and the delta is non-
+  trivial), it's surfaced — without needing a hand-tuned threshold per item.
+- **Daily AI digest** — one short Telegram message per day summarising the
+  last 24h of growth, written by the model.
+- **Cron-driven scheduler.** All periodic jobs (scan, AI review, digest)
+  are declared as cron expressions in `config.yaml` — no external scheduler
+  needed.
+- **Telegram alerts** with per-key dedup (30 min default) so a single full
+  disk doesn't spam your group.
+- **Single-password dashboard** with cookie auth — small group, LAN only.
+- **Lightweight.** ~15 MB static binary, distroless runtime image, no CGO.
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## Architecture
 
+```text
+            ┌────────────────────┐
+            │  Portainer stack   │
+            └─────────┬──────────┘
+                      │
+   ┌──────────────────┴──────────────────┐
+   │                                     │
+   │   ┌──────────┐     ┌────────────┐   │     ┌──────────┐
+   │   │   ssm    │────▶│ socket-    │───┼────▶│  docker  │
+   │   │ (Go bin) │     │  proxy     │   │     │  daemon  │
+   │   └────┬─────┘     └────────────┘   │     └──────────┘
+   │        │                            │
+   │        ├──── /host:ro ─── host filesystem (read-only bind)
+   │        │
+   │        ├──── HTTP ──▶ vllm (Qwen 3 8B, your network)
+   │        │
+   │        └──── HTTP ──▶ Telegram Bot API
+   │
+   └─────────────────────────────────────┘
 ```
-cd existing_repo
-git remote add origin https://gitlab.orb.appa8.com/ricgrangeia/server-space-manager.git
-git branch -M main
-git push -uf origin main
+
+## Quick start (Portainer git stack)
+
+1. **Create the shared network** on your host (one-time):
+
+   ```sh
+   docker network create vllm-net
+   ```
+
+   Make sure your vLLM container joins this network too.
+
+2. **Copy `config.example.yaml` to `config.yaml`** in this repo and edit it.
+   At minimum: set `http.password`, point `llm.base_url` at your vLLM, and
+   (optionally) fill in `telegram.bot_token` / `chat_id`.
+
+3. **Add a git stack in Portainer** pointing at this repo. Set stack env
+   vars as needed:
+
+   | Variable        | Default                                         | Purpose                                    |
+   | --------------- | ----------------------------------------------- | ------------------------------------------ |
+   | `SSM_IMAGE`     | `ghcr.io/ricgrangeia/server-space-manager-ai:latest` | Image to pull (override or use `build:`) |
+   | `SSM_PORT`      | `8080`                                          | Host port for the dashboard                |
+   | `VLLM_NETWORK`  | `vllm-net`                                      | External network with your vLLM container  |
+
+4. **Deploy.** Visit `http://<host>:8080`, log in with the password from
+   `config.yaml`.
+
+## Configuration
+
+See [`config.example.yaml`](config.example.yaml) — every key is documented inline.
+
+Key sections:
+
+- `scan_interval` / `retention_days` — how often to scan and how long to keep
+  history in SQLite.
+- `docker.*` — which Docker objects to track. Talks to `socket-proxy`.
+- `host_paths` — directories to walk on the host (mounted at `/host` inside
+  the container). Each entry has `max_depth` and optional `alert_growth_pct`.
+- `filesystems` — mount points to track capacity (statfs) for.
+- `llm.*` — OpenAI-compatible endpoint for `/api/ask`.
+- `telegram.*` — bot token + chat ID for push alerts.
+- `alerts.*` — thresholds (`fs_warn_pct`, `fs_crit_pct`, `big_item_mb`,
+  `growth_pct`).
+- `http.password` — single shared dashboard password. Empty disables auth.
+
+## HTTP API
+
+| Endpoint        | Method | Auth | Purpose                                            |
+| --------------- | ------ | ---- | -------------------------------------------------- |
+| `/`             | GET    | ✓    | Embedded dashboard                                 |
+| `/login`        | GET/POST | –  | Password form / cookie issue                       |
+| `/logout`       | GET    | –    | Clears the auth cookie                             |
+| `/healthz`      | GET    | –    | Liveness — returns `{status, version}`             |
+| `/api/summary`  | GET    | ✓    | Latest snapshot (top-N per kind, filesystem %s)    |
+| `/api/ask`      | POST   | ✓    | `{question}` → LLM answer based on current snapshot|
+
+## Security model
+
+- The manager talks to Docker through **tecnativa/docker-socket-proxy** with
+  only `CONTAINERS`, `IMAGES`, `VOLUMES`, `INFO` enabled. `POST` is denied,
+  so even if the manager is compromised it cannot `exec`, `create`, or
+  `delete` anything.
+- The host filesystem is mounted **read-only** at `/host:ro`.
+- The container runs as the **non-root** `nonroot:nonroot` user from the
+  distroless base.
+- The dashboard is intended for a **trusted LAN**. The single-password gate
+  is a convenience barrier, not a real authentication system. Do not expose
+  port 8080 to the public internet — front it with a reverse proxy that
+  provides TLS and stronger auth if remote access is needed.
+
+## Building locally
+
+```sh
+go mod tidy
+go build -o bin/ssm ./cmd/ssm
+./bin/ssm -config ./config.yaml -db ./data/ssm.db
 ```
 
-## Integrate with your tools
+Docker build:
 
-* [Set up project integrations](https://gitlab.orb.appa8.com/ricgrangeia/server-space-manager/-/settings/integrations)
+```sh
+docker build \
+  --build-arg VERSION=$(git describe --tags --always) \
+  --build-arg COMMIT=$(git rev-parse --short HEAD) \
+  --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  -t server-space-manager-ai:dev .
+```
 
-## Collaborate with your team
+## Versioning
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+Semantic versioning. Pre-1.0 releases may break config or API.
+See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+[MIT](LICENSE) © Ricardo Grangeia

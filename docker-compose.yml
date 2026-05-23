@@ -1,0 +1,78 @@
+# Server Space Manager — Portainer-compatible stack.
+#
+# This file is designed for Portainer's "Git stack" deployment: Portainer
+# clones the repo and runs `docker compose up -d` on the configured agent.
+# Environment variables come from the Portainer stack UI and are interpolated
+# into the file below using the standard ${VAR} syntax.
+#
+# The stack expects an already-existing external network where your vLLM
+# container lives (default name: vllm-net). Override via VLLM_NETWORK.
+
+services:
+
+  # ----------------------------------------------------------------------
+  # The manager itself. Runs the scan loop, exposes the dashboard, talks
+  # to vLLM and Telegram. Read-only on the host: mounts / at /host:ro.
+  # ----------------------------------------------------------------------
+  ssm:
+    image: ${SSM_IMAGE:-ghcr.io/ricgrangeia/server-space-manager-ai:latest}
+    # If you prefer to build from the repo (Portainer git stack), uncomment:
+    # build:
+    #   context: .
+    #   args:
+    #     VERSION: ${SSM_VERSION:-dev}
+    container_name: ssm
+    restart: unless-stopped
+    depends_on:
+      - socket-proxy
+    environment:
+      SSM_CONFIG: /etc/ssm/config.yaml
+      SSM_DB: /var/lib/ssm/ssm.db
+    volumes:
+      - ./config.yaml:/etc/ssm/config.yaml:ro
+      - ssm-data:/var/lib/ssm
+      # Host root mounted read-only so the scanner can sum log/volume sizes
+      # without any write capability.
+      - /:/host:ro
+    ports:
+      - "${SSM_PORT:-8080}:8080"
+    networks:
+      - ssm-internal
+      - vllm-net
+    security_opt:
+      - no-new-privileges:true
+
+  # ----------------------------------------------------------------------
+  # Read-only Docker socket proxy. Only the API surface needed for
+  # listing/inspecting containers, volumes, images, and df is exposed.
+  # ----------------------------------------------------------------------
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: ssm-socket-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      VOLUMES: 1
+      INFO: 1
+      # Everything else stays at 0 (POST denied).
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - ssm-internal
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  ssm-data:
+
+networks:
+  # Private network for ssm <-> socket-proxy traffic.
+  ssm-internal:
+    driver: bridge
+  # External network where your vLLM container lives. Create it once on the
+  # host with: `docker network create vllm-net` (or rename to match).
+  vllm-net:
+    name: ${VLLM_NETWORK:-vllm-net}
+    external: true

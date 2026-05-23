@@ -1,0 +1,20 @@
+# build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# local config / state — never commit secrets
+/config.yaml
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

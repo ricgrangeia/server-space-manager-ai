@@ -1,0 +1,115 @@
+# Server Space Manager — example configuration.
+#
+# Mount this file into the container at /etc/ssm/config.yaml (see
+# docker-compose.yml). All paths inside this file refer to paths *as seen
+# from inside the container* — host paths are bind-mounted under /host.
+
+# Cron schedules for the periodic jobs. Five-field crontab syntax, with
+# robfig/cron shortcuts (@every 1h, @hourly, @daily) supported.
+#
+# Leave any value empty to disable that job. The AI jobs additionally require
+# llm.enabled = true; they are skipped otherwise.
+schedules:
+  scan: "@every 1h"          # disk-usage walk + Docker inspection
+  ai_review: "0 */6 * * *"   # LLM-judged anomaly review every 6 hours
+  digest: "0 8 * * *"        # one daily summary at 08:00 (server time)
+
+# How long to keep historical samples in SQLite. Older rows are pruned after
+# each scan. Trend/growth queries are bounded by this window.
+retention_days: 90
+
+# ---------------------------------------------------------------------------
+# Docker
+# ---------------------------------------------------------------------------
+# We talk to Docker through tecnativa/docker-socket-proxy, which exposes a
+# read-only subset of the API. This keeps a compromised manager container
+# from being able to exec/create/delete anything on the host.
+docker:
+  enabled: true
+  host: "tcp://socket-proxy:2375"
+  track_volumes: true
+  track_images: true
+  track_logs: true
+  track_bind_mounts: true
+
+# ---------------------------------------------------------------------------
+# Host filesystem paths to walk. The host root is bind-mounted at /host
+# (read-only) in the compose file, so reference everything via /host/...
+# ---------------------------------------------------------------------------
+host_paths:
+  - path: /host/var/log
+    max_depth: 3
+  - path: /host/srv
+    max_depth: 2
+    alert_growth_pct: 20
+  - path: /host/var/lib/docker/volumes
+    max_depth: 2
+
+# Filesystems for capacity tracking (statfs). Each entry produces a "fs" sample
+# with total/avail bytes — used for the % full alerts.
+filesystems:
+  - /host
+  - /host/mnt/data
+
+# Names matched against filepath.Match — applied to both files and directory
+# names during the walk. Useful to skip caches and VCS metadata.
+ignore:
+  - "*.sock"
+  - "node_modules"
+  - ".git"
+
+# ---------------------------------------------------------------------------
+# Local LLM — vLLM (or any OpenAI-compatible endpoint).
+# Used only to answer questions via /api/ask; the scanner does not need it.
+# ---------------------------------------------------------------------------
+llm:
+  enabled: true
+  base_url: "http://vllm:8000/v1"
+  model: "Qwen/Qwen3-8B"
+  api_key: ""           # vLLM usually ignores this; set if you front it with auth
+  max_tokens: 1024
+  timeout_seconds: 60
+
+# ---------------------------------------------------------------------------
+# HTTP dashboard. LAN-only by design — do not expose to the public internet.
+# ---------------------------------------------------------------------------
+http:
+  listen: ":8080"
+  # Single shared password. Leave empty to disable auth (only safe on a
+  # fully trusted network). Prefer setting via the SSM_HTTP_PASSWORD env var
+  # in production so the secret stays out of git.
+  password: "change-me"
+
+# ---------------------------------------------------------------------------
+# Telegram alerting. Create a bot with @BotFather, then get your chat id by
+# sending a message to the bot and calling getUpdates.
+# ---------------------------------------------------------------------------
+telegram:
+  enabled: false
+  bot_token: ""
+  chat_id: ""
+
+# ---------------------------------------------------------------------------
+# Alert thresholds. Zero means "use the built-in default".
+#
+# There are two layers of detection:
+#
+#   1. Static rules (this block) — fire from every scan. Cheap, deterministic.
+#
+#   2. Baseline-anomaly detection — runs as part of the AI review job. For
+#      every (kind,key), it compares the last 24h of growth against that
+#      item's own daily average over the previous 7 days. Items growing
+#      >=3x their own baseline (and at least 50 MB in absolute terms) are
+#      forwarded to the LLM, which decides whether they're worth alerting on.
+#      This is what catches "this volume usually grows 10MB/day but added
+#      4GB today" — a static threshold can't see that.
+# ---------------------------------------------------------------------------
+alerts:
+  fs_warn_pct: 80       # warn when a filesystem reaches this % full
+  fs_crit_pct: 90       # critical alert above this %
+  big_item_mb: 5000     # flag any single log/volume/bind-mount above this
+  growth_pct: 25        # flag items that grew this % since the previous scan
+
+# Reserved — when true, the manager exposes a /api/delete endpoint. Off by
+# default: this project is read-only, the operator does the cleaning.
+allow_actions: false
