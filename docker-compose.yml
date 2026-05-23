@@ -15,12 +15,15 @@ services:
   # to vLLM and Telegram. Read-only on the host: mounts / at /host:ro.
   # ----------------------------------------------------------------------
   ssm:
-    image: ${SSM_IMAGE:-ghcr.io/ricgrangeia/server-space-manager-ai:latest}
-    # If you prefer to build from the repo (Portainer git stack), uncomment:
-    # build:
-    #   context: .
-    #   args:
-    #     VERSION: ${SSM_VERSION:-dev}
+    # Build from the repo by default — this is what Portainer git stacks do.
+    # Once you publish a pre-built image to a registry, override SSM_IMAGE in
+    # the stack env and remove (or comment out) the build: block to skip the
+    # build step on every redeploy.
+    image: ${SSM_IMAGE:-server-space-manager-ai:local}
+    build:
+      context: .
+      args:
+        VERSION: ${SSM_VERSION:-dev}
     container_name: ssm
     restart: unless-stopped
     depends_on:
