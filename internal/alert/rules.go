@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/ricgrangeia/server-space-manager-ai/internal/store"
 )
@@ -24,10 +25,27 @@ type Notifier interface {
 	Send(ctx context.Context, key, text string) error
 }
 
-// Evaluate inspects a batch of samples and fires alerts. Caller passes a Notifier
-// (e.g. Telegram). Returns the list of alert messages that were fired (for the UI).
+// Evaluate inspects a batch of samples and fires alerts. Caller passes a
+// Notifier (e.g. Telegram). Returns the list of alert messages that were
+// fired (for the UI).
+//
+// Per-item findings (filesystems near full, single large logs/volumes/bind
+// mounts) are emitted as individual alerts. Orphan volumes are deliberately
+// rolled up into one summary message per scan — hosts often accumulate many
+// anonymous volumes, and one ping per orphan would drown the Telegram chat.
 func Evaluate(ctx context.Context, n Notifier, r Rules, samples []store.Sample) []string {
 	var fired []string
+
+	// Orphan rollup state: count, total bytes, and the few biggest entries
+	// so the summary message can name something concrete.
+	var orphanCount int
+	var orphanBytes int64
+	type orphanItem struct {
+		label string
+		bytes int64
+	}
+	var biggest []orphanItem
+
 	for _, s := range samples {
 		switch s.Kind {
 		case "fs":
@@ -49,14 +67,32 @@ func Evaluate(ctx context.Context, n Notifier, r Rules, samples []store.Sample) 
 				fired = append(fired, msg)
 			}
 		case "orphan_volume":
-			if s.Bytes >= 100*1024*1024 {
-				msg := fmt.Sprintf("🧹 orphan volume `%s` (%s) — no container references it",
-					s.Label, humanBytes(s.Bytes))
-				_ = n.Send(ctx, "orphan:"+s.Key, msg)
-				fired = append(fired, msg)
-			}
+			// Always accumulate so the rollup sees every orphan, regardless
+			// of individual size. The minimum-size threshold from previous
+			// behaviour is dropped — many small orphans still matter in
+			// aggregate.
+			orphanCount++
+			orphanBytes += s.Bytes
+			biggest = append(biggest, orphanItem{s.Label, s.Bytes})
 		}
 	}
+
+	if orphanCount > 0 {
+		// Sort biggest desc, take top 3 to name in the summary.
+		sort.Slice(biggest, func(i, j int) bool { return biggest[i].bytes > biggest[j].bytes })
+		var preview string
+		for i := 0; i < len(biggest) && i < 3; i++ {
+			preview += fmt.Sprintf("\n• `%s` (%s)", biggest[i].label, humanBytes(biggest[i].bytes))
+		}
+		msg := fmt.Sprintf("🧹 *%d orphan volumes* — %s total%s",
+			orphanCount, humanBytes(orphanBytes), preview)
+		// Stable dedupe key: same count -> same message within the 30-min
+		// window won't repeat. Changes in count (a new orphan appeared,
+		// or one was cleaned) re-fire so the rollup stays current.
+		_ = n.Send(ctx, fmt.Sprintf("orphan-rollup:%d", orphanCount), msg)
+		fired = append(fired, msg)
+	}
+
 	return fired
 }
 
