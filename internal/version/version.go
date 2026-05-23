@@ -14,7 +14,7 @@
 package version
 
 // Version is the semantic version of this release. Bump here, then git tag.
-const Version = "v0.2.0"
+const Version = "v0.3.0"
 
 // Commit is the short git SHA the binary was built from. Optional; set via
 // -ldflags. Defaults to "none" for local builds.

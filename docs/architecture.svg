@@ -28,7 +28,7 @@
 
   <!-- Title -->
   <text x="500" y="44" text-anchor="middle" fill="#e6edf3" font-size="22" font-weight="600">Server Space Manager AI</text>
-  <text x="500" y="68" text-anchor="middle" fill="#8b949e" font-size="13">Lightweight Go daemon · Docker + host disk usage · local LLM · Telegram</text>
+  <text x="500" y="68" text-anchor="middle" fill="#8b949e" font-size="13">Lightweight Go daemon · Docker + host disk usage · local LLM · Telegram · <tspan fill="#c9d1d9">v0.3.0</tspan></text>
 
   <!-- ===== Core box ===== -->
   <g filter="url(#glow)">

@@ -233,18 +233,29 @@ func main() {
 	log.Printf("shutting down")
 }
 
-// buildScanReport formats a short human-readable summary of a snapshot,
-// suitable for a Telegram message body. Markdown-flavoured (Telegram
-// `parse_mode=Markdown`). Sections are skipped if empty so the report
-// stays compact on quiet hosts.
-func buildScanReport(snap api.Snapshot) string {
+// buildScanReport formats the rich end-of-scan summary pushed to Telegram.
+// Markdown-flavoured (Telegram `parse_mode=Markdown`). Sections are skipped
+// when empty so the report stays compact on quiet hosts.
+//
+// Layout (top to bottom):
+//
+//	headline ........... sample count + alert count
+//	*Disk* ............. filesystems with usage bar + GB used / total
+//	*Top container logs* ... 5 biggest
+//	*Top volumes* .......... 5 biggest in-use
+//	*Top bind mounts* ...... 5 biggest non-trivial
+//	*Biggest files* ........ 5 biggest individual files
+//	*Anomalies* ............ recent 24h growth vs 7-day baseline
+//	*Orphan volumes* ....... rollup count + total bytes + top 3 names
+//	*Alerts* ............... rule fires from this scan (first 5)
+func buildScanReport(snap api.Snapshot, st *store.Store) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d samples, %d alerts", snap.SampleCount, len(snap.Alerts))
 
-	// Filesystems with their % full, sorted by % desc.
+	// --- Disk overview: every filesystem with bar + bytes ----------------
 	type fsRow struct {
-		path string
-		pct  float64
+		path             string
+		used, total, pct float64
 	}
 	var fss []fsRow
 	for _, s := range snap.Samples {
@@ -256,25 +267,28 @@ func buildScanReport(snap api.Snapshot) string {
 			Avail int64 `json:"avail"`
 		}
 		if err := json.Unmarshal([]byte(s.Extra), &extra); err == nil && extra.Total > 0 {
-			used := extra.Total - extra.Avail
-			fss = append(fss, fsRow{s.Label, 100 * float64(used) / float64(extra.Total)})
+			used := float64(extra.Total - extra.Avail)
+			fss = append(fss, fsRow{
+				path: s.Label, used: used, total: float64(extra.Total),
+				pct: 100 * used / float64(extra.Total),
+			})
 		}
 	}
 	sort.Slice(fss, func(i, j int) bool { return fss[i].pct > fss[j].pct })
 	if len(fss) > 0 {
-		b.WriteString("\n\n*Filesystems:*")
-		for i, f := range fss {
-			if i >= 3 {
-				break
-			}
-			fmt.Fprintf(&b, "\n• `%s` — %.0f%%", f.path, f.pct)
+		b.WriteString("\n\n*Disk:*")
+		for _, f := range fss {
+			fmt.Fprintf(&b, "\n• `%s` %s %.0f%%  (%s / %s)",
+				f.path, usageBar(f.pct), f.pct,
+				humanBytes(int64(f.used)), humanBytes(int64(f.total)))
 		}
 	}
 
-	addTop := func(title, kind string, n int) {
+	// --- Generic top-N helper for kinds where size is what matters --------
+	addTop := func(title, kind string, n int, minBytes int64) {
 		var picked []store.Sample
 		for _, s := range snap.Samples {
-			if s.Kind == kind {
+			if s.Kind == kind && s.Bytes >= minBytes {
 				picked = append(picked, s)
 			}
 		}
@@ -290,15 +304,79 @@ func buildScanReport(snap api.Snapshot) string {
 			fmt.Fprintf(&b, "\n• `%s` — %s", s.Label, humanBytes(s.Bytes))
 		}
 	}
-	addTop("Top container logs", "container_log", 3)
-	addTop("Top volumes", "volume", 3)
+	addTop("Top container logs", "container_log", 5, 0)
+	addTop("Top volumes", "volume", 5, 0)
+	addTop("Top bind mounts", "bind_mount", 5, 100*1024*1024)
+	addTop("Biggest files", "big_file", 5, 0)
 
-	// Up to 3 active alerts, truncated so we don't blow the Telegram message limit.
-	if len(snap.Alerts) > 0 {
-		b.WriteString("\n\n*Alerts:*")
-		for i, a := range snap.Alerts {
+	// --- Anomalies: last-24h growth vs 7-day per-item baseline ----------
+	if st != nil {
+		var anoms []store.AnomalyRow
+		for _, k := range []string{"container_log", "volume", "host_path", "bind_mount", "image"} {
+			rows, err := st.BaselineAnomalies(k, 7, 3.0, 50*1024*1024, 5)
+			if err == nil {
+				anoms = append(anoms, rows...)
+			}
+		}
+		sort.Slice(anoms, func(i, j int) bool { return anoms[i].Ratio > anoms[j].Ratio })
+		if len(anoms) > 0 {
+			b.WriteString("\n\n*Anomalies (24h vs baseline):*")
+			for i, a := range anoms {
+				if i >= 5 {
+					break
+				}
+				ratio := fmt.Sprintf("%.1fx", a.Ratio)
+				if a.Ratio >= 999 {
+					ratio = "new"
+				}
+				fmt.Fprintf(&b, "\n• `%s` +%s (%s)",
+					a.Label, humanBytes(a.Last24hDelta), ratio)
+			}
+		}
+	}
+
+	// --- Orphan volumes: rollup count + bytes + top 3 ---------------------
+	var orphanCount int
+	var orphanBytes int64
+	type orphanRow struct {
+		label string
+		bytes int64
+	}
+	var orphans []orphanRow
+	for _, s := range snap.Samples {
+		if s.Kind == "orphan_volume" {
+			orphanCount++
+			orphanBytes += s.Bytes
+			orphans = append(orphans, orphanRow{s.Label, s.Bytes})
+		}
+	}
+	if orphanCount > 0 {
+		sort.Slice(orphans, func(i, j int) bool { return orphans[i].bytes > orphans[j].bytes })
+		fmt.Fprintf(&b, "\n\n*Orphan volumes:* %d, %s total",
+			orphanCount, humanBytes(orphanBytes))
+		for i, o := range orphans {
 			if i >= 3 {
-				fmt.Fprintf(&b, "\n• (+%d more)", len(snap.Alerts)-i)
+				break
+			}
+			fmt.Fprintf(&b, "\n• `%s` (%s)", o.label, humanBytes(o.bytes))
+		}
+	}
+
+	// --- Active alerts from this scan ------------------------------------
+	// The orphan rollup string is already rendered in its own section
+	// above; drop it here so the report doesn't duplicate that content.
+	var alerts []string
+	for _, a := range snap.Alerts {
+		if strings.Contains(a, "orphan volumes") {
+			continue
+		}
+		alerts = append(alerts, a)
+	}
+	if len(alerts) > 0 {
+		b.WriteString("\n\n*Alerts:*")
+		for i, a := range alerts {
+			if i >= 5 {
+				fmt.Fprintf(&b, "\n• (+%d more)", len(alerts)-i)
 				break
 			}
 			b.WriteString("\n• ")
@@ -306,6 +384,21 @@ func buildScanReport(snap api.Snapshot) string {
 		}
 	}
 	return b.String()
+}
+
+// usageBar returns a 10-segment unicode bar for a percentage. Used in the
+// Telegram disk-overview lines so each filesystem's headroom is visible at
+// a glance, without needing a chart.
+func usageBar(pct float64) string {
+	const segs = 10
+	filled := int(pct * segs / 100)
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > segs {
+		filled = segs
+	}
+	return strings.Repeat("█", filled) + strings.Repeat("░", segs-filled)
 }
 
 // humanBytes formats a byte count with two-letter units (KB, MB, GB…).
@@ -385,7 +478,7 @@ func runScan(
 	// so operators can mute hourly pings if they want only alerts.
 	if cfg.Telegram.ScanReportsEnabled() {
 		key := "scan:report:" + now.UTC().Format(time.RFC3339)
-		_ = notifier.Send(ctx, key, "📊 *scan complete* — "+buildScanReport(snap))
+		_ = notifier.Send(ctx, key, "📊 *scan complete* — "+buildScanReport(snap, st))
 	}
 }
 

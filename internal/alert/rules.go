@@ -78,18 +78,18 @@ func Evaluate(ctx context.Context, n Notifier, r Rules, samples []store.Sample) 
 	}
 
 	if orphanCount > 0 {
-		// Sort biggest desc, take top 3 to name in the summary.
+		// We deliberately do NOT push the orphan rollup as a standalone
+		// Telegram message — the end-of-scan report (cmd/ssm.buildScanReport)
+		// includes its own Orphan section so the operator gets one rich
+		// message instead of two thin ones. The dashboard "Findings" card
+		// still shows this string as a rule-engine alert via `fired`.
 		sort.Slice(biggest, func(i, j int) bool { return biggest[i].bytes > biggest[j].bytes })
 		var preview string
 		for i := 0; i < len(biggest) && i < 3; i++ {
 			preview += fmt.Sprintf("\n• `%s` (%s)", biggest[i].label, humanBytes(biggest[i].bytes))
 		}
-		msg := fmt.Sprintf("🧹 *%d orphan volumes* — %s total%s",
+		msg := fmt.Sprintf("🧹 %d orphan volumes — %s total%s",
 			orphanCount, humanBytes(orphanBytes), preview)
-		// Stable dedupe key: same count -> same message within the 30-min
-		// window won't repeat. Changes in count (a new orphan appeared,
-		// or one was cleaned) re-fire so the rollup stays current.
-		_ = n.Send(ctx, fmt.Sprintf("orphan-rollup:%d", orphanCount), msg)
 		fired = append(fired, msg)
 	}
 

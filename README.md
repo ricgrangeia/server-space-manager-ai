@@ -40,10 +40,20 @@ Built to live on a Portainer git stack, alongside your existing vLLM.
 - **Cron-driven scheduler.** All periodic jobs (scan, AI review, digest)
   are declared as cron expressions in `config.yaml` — no external scheduler
   needed.
-- **Telegram alerts** with per-key dedup (30 min default) so a single full
-  disk doesn't spam your group.
-- **Single-password dashboard** with cookie auth — small group, LAN only.
-- **Lightweight.** ~15 MB static binary, distroless runtime image, no CGO.
+- **Telegram alerts** with per-key dedup (30 min default) and a per-scan
+  *rollup* for orphan volumes — "🧹 23 orphan volumes — 4.2 GB total"
+  instead of one ping per item.
+- **End-of-scan reports on Telegram** for cron and manual scans alike,
+  with the top filesystems, container logs, volumes and active alerts.
+  Mute with a single config flag.
+- **Biggest files** card on the dashboard — top N largest individual files
+  across all configured paths. Good for spotting leaked core dumps and
+  unrotated logs.
+- **Findings panel** unifying AI-review verdicts and rule-engine alerts
+  from the last 7 days, with source/severity badges and a filter.
+- **Single-password dashboard** with random-token session cookies, baseline
+  security headers, and rate-limited `/api/ask`. LAN-only by design.
+- **Lightweight.** ~21 MB static binary, distroless runtime image, no CGO.
 
 ## Architecture
 
@@ -123,7 +133,11 @@ Key sections:
 | `/logout`       | GET    | –    | Clears the auth cookie                             |
 | `/healthz`      | GET    | –    | Liveness — returns `{status, version}`             |
 | `/api/summary`  | GET    | ✓    | Latest snapshot (top-N per kind, filesystem %s)    |
-| `/api/ask`      | POST   | ✓    | `{question}` → LLM answer based on current snapshot|
+| `/api/findings` | GET    | ✓    | Last 7 days of findings; `?source=rules\|ai_review` |
+| `/api/ask`      | POST   | ✓    | `{question}` → LLM answer (rate-limited)            |
+| `/api/trigger/scan`      | POST | ✓ | Run a scan on demand                                |
+| `/api/trigger/ai-review` | POST | ✓ | Run the AI review on demand                         |
+| `/api/trigger/digest`    | POST | ✓ | Send the daily AI digest on demand                  |
 
 ## Security model
 
