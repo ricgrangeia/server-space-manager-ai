@@ -190,6 +190,17 @@ docker build \
   -t server-space-manager-ai:dev .
 ```
 
+## Author
+
+Ricardo Grangeia — Software Engineer — Portugal
+
+[![Website](https://img.shields.io/badge/Website-ricardo.grangeia.pt-blue)](https://ricardo.grangeia.dias)
+[![Email](https://img.shields.io/badge/Email-Contact%20Me-red)](mailto:ricardo@grangeia.pt)
+
+---
+
+
+
 ## Versioning
 
 Semantic versioning. Pre-1.0 releases may break config or API.
