@@ -65,6 +65,21 @@ type TelegramCfg struct {
 	Enabled  bool   `yaml:"enabled"`
 	BotToken string `yaml:"bot_token"`
 	ChatID   string `yaml:"chat_id"`
+	// ScanReports controls whether the end-of-scan summary is pushed to
+	// Telegram. Applies to both cron-driven and manual scans. Defaults to
+	// true; set false (or SSM_TELEGRAM_SCAN_REPORTS=false) if hourly pings
+	// are too noisy and you only want alerts/anomalies.
+	ScanReports *bool `yaml:"scan_reports"`
+}
+
+// ScanReportsEnabled returns whether end-of-scan reports should be sent.
+// Defaults to true when the field is not set in YAML, so the typical
+// deployment gets reports without needing to configure anything.
+func (t TelegramCfg) ScanReportsEnabled() bool {
+	if t.ScanReports == nil {
+		return true
+	}
+	return *t.ScanReports
 }
 
 type AlertsCfg struct {
@@ -170,5 +185,9 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := os.Getenv("SSM_TELEGRAM_CHAT_ID"); v != "" {
 		c.Telegram.ChatID = v
+	}
+	if v := os.Getenv("SSM_TELEGRAM_SCAN_REPORTS"); v != "" {
+		b := v == "true" || v == "1"
+		c.Telegram.ScanReports = &b
 	}
 }

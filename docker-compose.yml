@@ -50,6 +50,7 @@ services:
       SSM_TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-false}
       SSM_TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       SSM_TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      SSM_TELEGRAM_SCAN_REPORTS: ${TELEGRAM_SCAN_REPORTS:-true}
     volumes:
       - ssm-data:/var/lib/ssm
       - /:/host:ro

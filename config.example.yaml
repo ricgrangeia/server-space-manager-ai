@@ -91,6 +91,10 @@ telegram:
   enabled: false
   bot_token: ""
   chat_id: ""
+  # End-of-scan reports — one Telegram message after every scan (cron and
+  # manual) with the top filesystems, top logs, top volumes, and any active
+  # alerts. Defaults to true; flip to false if hourly pings are too noisy.
+  scan_reports: true
 
 # ---------------------------------------------------------------------------
 # Alert thresholds. Zero means "use the built-in default".

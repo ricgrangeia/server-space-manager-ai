@@ -136,10 +136,15 @@ func main() {
 
 	var srv *api.Server
 	triggers := api.Triggers{
-		Scan: notifyManual("scan", func(c context.Context) string {
+		// Scan deliberately bypasses notifyManual: runScan already sends
+		// the end-of-scan Telegram report (so cron and manual paths look
+		// identical). We just prepend a one-line "manual trigger" ping so
+		// the operator sees their click was acknowledged.
+		Scan: func(c context.Context) {
+			startKey := fmt.Sprintf("manual:scan:start:%d", time.Now().UnixNano())
+			_ = notifier.Send(c, startKey, "▶️ *scan* started (manual trigger)")
 			runScan(c, cfg, st, host, dock, srv, notifier, rules)
-			return buildScanReport(srv.LastSnapshot())
-		}),
+		},
 		AIReview: notifyManual("AI review", func(c context.Context) string {
 			if reviewer.LLM == nil {
 				return "skipped (LLM disabled)"
@@ -351,13 +356,23 @@ func runScan(
 		}
 	}
 
-	srv.SetSnapshot(api.Snapshot{
+	snap := api.Snapshot{
 		TakenAt:     now,
 		Samples:     samples,
 		SampleCount: len(samples),
 		Alerts:      fired,
-	})
+	}
+	srv.SetSnapshot(snap)
 	log.Printf("scan complete: %d samples, %d alerts", len(samples), len(fired))
+
+	// End-of-scan Telegram report. Same code path for cron and manual
+	// triggers — manual just adds a "started" ping before runScan, so the
+	// finished message lives in one place. Gated by telegram.scan_reports
+	// so operators can mute hourly pings if they want only alerts.
+	if cfg.Telegram.ScanReportsEnabled() {
+		key := "scan:report:" + now.UTC().Format(time.RFC3339)
+		_ = notifier.Send(ctx, key, "📊 *scan complete* — "+buildScanReport(snap))
+	}
 }
 
 // buildScheduler wires the configured cron expressions to the corresponding
