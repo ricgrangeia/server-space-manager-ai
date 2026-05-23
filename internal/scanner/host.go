@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/ricgrangeia/server-space-manager-ai/internal/config"
@@ -92,13 +91,15 @@ func (h *HostScanner) walkPath(p config.PathCfg, now time.Time) []store.Sample {
 	return out
 }
 
+// statFS is implemented per-platform in host_linux.go / host_other.go because
+// syscall.Statfs only exists on Unix-like systems. The daemon's deployment
+// target is Linux containers; the non-Linux stub returns ok=false so unit
+// tests can still build on a developer's Windows/macOS machine.
 func (h *HostScanner) statFS(path string, now time.Time) (store.Sample, bool) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(path, &st); err != nil {
+	total, avail, ok := statfs(path)
+	if !ok {
 		return store.Sample{}, false
 	}
-	total := int64(st.Blocks) * int64(st.Bsize)
-	avail := int64(st.Bavail) * int64(st.Bsize)
 	used := total - avail
 	return store.Sample{
 		Kind:    "fs",

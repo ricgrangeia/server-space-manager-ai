@@ -3,44 +3,132 @@ package scanner
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"io/fs"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
-
 	"github.com/ricgrangeia/server-space-manager-ai/internal/config"
 	"github.com/ricgrangeia/server-space-manager-ai/internal/store"
 )
 
+// DockerScanner inspects Docker via plain HTTP against either:
+//   - a TCP endpoint (typical: the tecnativa/docker-socket-proxy sidecar)
+//   - a Unix domain socket (when the manager is given direct socket access)
+//
+// We talk to the Engine API by hand rather than importing the Docker SDK,
+// which would drag in a large dependency tree (go-connections, OpenTelemetry,
+// containerd/log, etc.) for the four endpoints we actually need:
+//
+//   - GET /containers/json?all=true   — list containers (incl. stopped)
+//   - GET /containers/{id}/json       — inspect for log path, mounts, labels
+//   - GET /system/df                  — disk-usage breakdown for volumes/images
+//   - GET /volumes                    — volume list incl. orphan detection
 type DockerScanner struct {
-	cli *client.Client
-	cfg config.DockerCfg
+	cfg     config.DockerCfg
+	http    *http.Client
+	baseURL string // http://host:port — host is ignored for unix sockets
 }
 
+// NewDocker builds a scanner against cfg.Host. Accepted forms:
+//
+//   - "tcp://host:port"        — standard TCP, used with socket-proxy
+//   - "http://host:port"       — alias for tcp://
+//   - "unix:///path/to/sock"   — direct Unix socket access
+//   - ""                        — defaults to /var/run/docker.sock
 func NewDocker(cfg config.DockerCfg) (*DockerScanner, error) {
-	opts := []client.Opt{client.WithAPIVersionNegotiation()}
-	if cfg.Host != "" {
-		opts = append(opts, client.WithHost(cfg.Host))
-	} else {
-		opts = append(opts, client.FromEnv)
+	host := cfg.Host
+	if host == "" {
+		host = "unix:///var/run/docker.sock"
 	}
-	cli, err := client.NewClientWithOpts(opts...)
-	if err != nil {
-		return nil, err
+
+	d := &DockerScanner{cfg: cfg}
+	switch {
+	case strings.HasPrefix(host, "unix://"):
+		sockPath := strings.TrimPrefix(host, "unix://")
+		d.http = &http.Client{
+			Timeout: 15 * time.Second,
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var dialer net.Dialer
+					return dialer.DialContext(ctx, "unix", sockPath)
+				},
+			},
+		}
+		// Host portion is ignored when dialing the socket; URL just needs to parse.
+		d.baseURL = "http://docker"
+	case strings.HasPrefix(host, "tcp://"):
+		d.baseURL = "http://" + strings.TrimPrefix(host, "tcp://")
+		d.http = &http.Client{Timeout: 15 * time.Second}
+	case strings.HasPrefix(host, "http://"), strings.HasPrefix(host, "https://"):
+		d.baseURL = host
+		d.http = &http.Client{Timeout: 15 * time.Second}
+	default:
+		return nil, fmt.Errorf("docker host: unsupported scheme %q", host)
 	}
-	return &DockerScanner{cli: cli, cfg: cfg}, nil
+	return d, nil
 }
 
+// containerSummary mirrors the fields we use from GET /containers/json.
+// Anything else in the response is ignored.
+type containerSummary struct {
+	ID     string            `json:"Id"`
+	Names  []string          `json:"Names"`
+	State  string            `json:"State"`
+	Labels map[string]string `json:"Labels"`
+	Mounts []containerMount  `json:"Mounts"`
+}
+
+type containerMount struct {
+	Type   string `json:"Type"`
+	Source string `json:"Source"`
+}
+
+// containerInspect carries the LogPath field needed to sum log sizes.
+type containerInspect struct {
+	LogPath string `json:"LogPath"`
+}
+
+// diskUsage is the relevant subset of GET /system/df.
+type diskUsage struct {
+	Images  []duImage  `json:"Images"`
+	Volumes []duVolume `json:"Volumes"`
+}
+
+type duImage struct {
+	ID         string   `json:"Id"`
+	RepoTags   []string `json:"RepoTags"`
+	Size       int64    `json:"Size"`
+	SharedSize int64    `json:"SharedSize"`
+	Containers int64    `json:"Containers"`
+}
+
+type duVolume struct {
+	Name      string         `json:"Name"`
+	Driver    string         `json:"Driver"`
+	UsageData *duVolumeUsage `json:"UsageData,omitempty"`
+}
+
+type duVolumeUsage struct {
+	Size     int64 `json:"Size"`
+	RefCount int64 `json:"RefCount"`
+}
+
+// Scan collects samples from Docker. Best-effort: any failed sub-call logs
+// nothing and is simply omitted from the result, so a partial outage of the
+// socket-proxy degrades gracefully rather than dropping the whole scan.
 func (d *DockerScanner) Scan(ctx context.Context, now time.Time) []store.Sample {
 	var out []store.Sample
 
-	containers, err := d.cli.ContainerList(ctx, container.ListOptions{All: true})
-	if err == nil {
+	var containers []containerSummary
+	if err := d.get(ctx, "/containers/json?all=true", &containers); err == nil {
 		for _, c := range containers {
 			name := strings.TrimPrefix(firstName(c.Names), "/")
 			stack := c.Labels["com.docker.compose.project"]
@@ -60,11 +148,10 @@ func (d *DockerScanner) Scan(ctx context.Context, now time.Time) []store.Sample 
 					if m.Type != "bind" {
 						continue
 					}
-					src := m.Source
-					if size, ok := dirSize(src); ok {
+					if size, ok := dirSize(m.Source); ok {
 						out = append(out, store.Sample{
-							Kind: "bind_mount", Key: c.ID + ":" + src,
-							Label: name + " -> " + src,
+							Kind: "bind_mount", Key: c.ID + ":" + m.Source,
+							Label: name + " -> " + m.Source,
 							Bytes: size, Extra: extra, TakenAt: now,
 						})
 					}
@@ -74,13 +161,10 @@ func (d *DockerScanner) Scan(ctx context.Context, now time.Time) []store.Sample 
 	}
 
 	if d.cfg.TrackVolumes || d.cfg.TrackImages {
-		du, err := d.cli.DiskUsage(ctx, types.DiskUsageOptions{})
-		if err == nil {
+		var du diskUsage
+		if err := d.get(ctx, "/system/df", &du); err == nil {
 			if d.cfg.TrackVolumes {
 				for _, v := range du.Volumes {
-					if v == nil {
-						continue
-					}
 					size, refs := int64(0), int64(-1)
 					if v.UsageData != nil {
 						size = v.UsageData.Size
@@ -99,9 +183,6 @@ func (d *DockerScanner) Scan(ctx context.Context, now time.Time) []store.Sample 
 			}
 			if d.cfg.TrackImages {
 				for _, img := range du.Images {
-					if img == nil {
-						continue
-					}
 					tag := "<none>"
 					if len(img.RepoTags) > 0 {
 						tag = img.RepoTags[0]
@@ -121,6 +202,29 @@ func (d *DockerScanner) Scan(ctx context.Context, now time.Time) []store.Sample 
 	return out
 }
 
+// get performs a GET against the Docker Engine API and decodes the JSON body.
+// Returns an error on non-2xx response (with the body trimmed for context).
+func (d *DockerScanner) get(ctx context.Context, path string, into any) error {
+	u, err := url.Parse(d.baseURL + path)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := d.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("docker %s: status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return json.NewDecoder(resp.Body).Decode(into)
+}
+
 func firstName(names []string) string {
 	if len(names) == 0 {
 		return ""
@@ -135,15 +239,23 @@ func labelExtra(stack, service, state string) string {
 	return string(b)
 }
 
-// logSize returns the size of LogPath plus rotated siblings. Tries /host-prefixed
-// path as a fallback if the host root is mounted under /host inside the container.
+// logSize returns the total size of a container's JSON-file log set
+// (the active file plus any rotated *.1, *.2, ... siblings).
+//
+// The Engine reports LogPath as a host path (e.g.
+// /var/lib/docker/containers/<id>/<id>-json.log). When the host root is
+// mounted read-only at /host inside the manager (the recommended layout),
+// the file is reachable at the same path prefixed with /host.
 func (d *DockerScanner) logSize(ctx context.Context, id string) (int64, bool) {
-	info, err := d.cli.ContainerInspect(ctx, id)
-	if err != nil || info.LogPath == "" {
+	var info containerInspect
+	if err := d.get(ctx, "/containers/"+url.PathEscape(id)+"/json", &info); err != nil || info.LogPath == "" {
 		return 0, false
 	}
 	for _, base := range []string{info.LogPath, "/host" + info.LogPath} {
 		if _, err := os.Stat(base); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			continue
 		}
 		var total int64
