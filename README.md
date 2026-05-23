@@ -127,24 +127,50 @@ Key sections:
 
 ## Security model
 
-- The Docker socket is mounted **read-only** at `/var/run/docker.sock:ro`.
-  The Go HTTP client only issues GET requests against four endpoints
+**Mount layout**
+
+- Docker socket mounted **read-only** at `/var/run/docker.sock:ro`. The Go
+  HTTP client only ever issues `GET` requests against four endpoints
   (`/containers/json`, `/containers/{id}/json`, `/system/df`, `/volumes`).
-  Even though the daemon runs as root inside the container, the read-only
-  mount blocks Docker API writes at the kernel level. If you want
-  defense-in-depth, put `tecnativa/docker-socket-proxy` or
-  `wollomatic/socket-proxy` in front and set
-  `docker.host: "tcp://socket-proxy:2375"` in the config.
-- The host filesystem is mounted **read-only** at `/host:ro`.
-- The container's only writable surface is its own named volume
-  (`ssm-data`, holding the SQLite DB). No write access to the host or to
-  the Docker API.
-- The image is **distroless** — no shell, no package manager, no busybox.
-  Single static Go binary.
-- The dashboard is intended for a **trusted LAN**. The single-password gate
-  is a convenience barrier, not a real authentication system. Do not expose
-  port 8080 to the public internet — front it with a reverse proxy that
-  provides TLS and stronger auth if remote access is needed.
+  The read-only mount blocks Engine API writes at the kernel level even if
+  the code were rewritten to attempt them.
+- Host filesystem mounted **read-only** at `/host:ro`.
+- The container's only writable surface is its own named volume `ssm-data`
+  (holds the SQLite DB). No write access to the host or to Docker.
+
+**Authentication & transport**
+
+- Dashboard login uses a shared password. On success the server mints a
+  **32-byte random session token** (HttpOnly, SameSite=Strict cookie); the
+  password itself never lives in the cookie. Sessions are kept in memory,
+  expire after 30 days, and are invalidated on logout or process restart.
+- All responses carry baseline security headers: `X-Content-Type-Options:
+  nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a
+  CSP that blocks cross-origin scripts/styles and iframe embedding.
+- `/api/ask` is rate-limited (token bucket: 5 burst, refill 1 every 10 s)
+  so a single tab can't saturate the local LLM.
+- No TLS on `:8080` — front with a reverse proxy if you need remote access.
+
+**Image & runtime**
+
+- Distroless base — no shell, no package manager, no busybox. Single static
+  Go binary, ~21 MB total image size.
+- Container runs as root **only because** `/var/run/docker.sock` is owned by
+  `root:docker` on the host. The read-only mounts and absence of a shell
+  keep the blast radius minimal even with elevated UID.
+- `no-new-privileges:true` set in compose.
+
+**Defence in depth (optional)**
+
+If you want a hard policy boundary in front of the Docker socket, put
+`tecnativa/docker-socket-proxy` or `wollomatic/socket-proxy` in front and
+set `docker.host: "tcp://socket-proxy:2375"` in the config.
+
+**Caveat**
+
+The single-password gate is a convenience barrier for a trusted LAN, not a
+real identity system. Do not expose port 8080 to the public internet
+directly.
 
 ## Building locally
 

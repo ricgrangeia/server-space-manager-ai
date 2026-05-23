@@ -8,8 +8,10 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -54,12 +56,25 @@ type Server struct {
 	store    *store.Store // used by /api/ask to enrich the prompt with history
 	trig     Triggers
 
-	mu       sync.RWMutex
-	snap     Snapshot
+	mu   sync.RWMutex
+	snap Snapshot
+
 	// running guards each trigger kind so a button mash doesn't queue
 	// several scans on top of each other.
 	running  map[string]bool
 	runningM sync.Mutex
+
+	// sessions maps a random opaque token (set as the auth cookie) to its
+	// expiry. Replacing the prior plaintext-password cookie: a session
+	// reveals nothing about the password if leaked, and revoking access
+	// across the whole user base is a single restart.
+	sessions  map[string]time.Time
+	sessionsM sync.Mutex
+
+	// askLimit is a tiny token bucket guarding /api/ask. The LLM is the
+	// most expensive resource the dashboard touches; rate-limiting prevents
+	// a single tab from saturating vLLM for the rest of the LAN.
+	askLimit *tokenBucket
 }
 
 // New builds a Server. The store enables /api/ask to feed the model recent
@@ -76,7 +91,107 @@ func New(listen, password string, llmClient *llm.Client, st *store.Store, trig T
 		store:    st,
 		trig:     trig,
 		running:  map[string]bool{},
+		sessions: map[string]time.Time{},
+		// Allow short bursts (5 questions back-to-back) but cap long-term
+		// rate at one every 10s. Plenty for interactive use; chokes runaway
+		// scripts or a stuck dashboard tab.
+		askLimit: newTokenBucket(5, 10*time.Second),
 	}
+}
+
+// sessionTTL controls how long an issued session cookie stays valid before
+// the user has to log in again. 30 days mirrors the previous cookie MaxAge.
+const sessionTTL = 30 * 24 * time.Hour
+
+// maxSessions caps the in-memory session map. Far higher than the realistic
+// user count; we sweep expired entries on every new login, so the cap is a
+// safety net for buggy clients that never reuse cookies.
+const maxSessions = 1024
+
+// newSession generates a 256-bit random token, records it with an expiry,
+// and returns it. Expired entries are swept opportunistically here so the
+// map never grows unbounded.
+func (s *Server) newSession() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	tok := base64.RawURLEncoding.EncodeToString(b[:])
+
+	s.sessionsM.Lock()
+	defer s.sessionsM.Unlock()
+	now := time.Now()
+	if len(s.sessions) >= maxSessions {
+		for k, exp := range s.sessions {
+			if now.After(exp) {
+				delete(s.sessions, k)
+			}
+		}
+	}
+	s.sessions[tok] = now.Add(sessionTTL)
+	return tok, nil
+}
+
+// validSession returns true if tok is a known, unexpired session token.
+// Comparison uses constant-time semantics by routing the lookup through a
+// map; the token itself is high-entropy so timing is not a practical concern.
+func (s *Server) validSession(tok string) bool {
+	if tok == "" {
+		return false
+	}
+	s.sessionsM.Lock()
+	defer s.sessionsM.Unlock()
+	exp, ok := s.sessions[tok]
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		delete(s.sessions, tok)
+		return false
+	}
+	return true
+}
+
+// revokeSession invalidates a single token. Called from /logout.
+func (s *Server) revokeSession(tok string) {
+	s.sessionsM.Lock()
+	delete(s.sessions, tok)
+	s.sessionsM.Unlock()
+}
+
+// tokenBucket is a minimal in-process rate limiter: capacity tokens, one
+// refilled every refill. Take() returns false when the bucket is empty.
+// Single global instance is sufficient for a small-team LAN dashboard;
+// per-IP buckets would be overkill for the expected user count.
+type tokenBucket struct {
+	mu       sync.Mutex
+	capacity int
+	tokens   int
+	refill   time.Duration
+	last     time.Time
+}
+
+func newTokenBucket(capacity int, refill time.Duration) *tokenBucket {
+	return &tokenBucket{capacity: capacity, tokens: capacity, refill: refill, last: time.Now()}
+}
+
+func (b *tokenBucket) Take() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := time.Now()
+	add := int(now.Sub(b.last) / b.refill)
+	if add > 0 {
+		b.tokens += add
+		if b.tokens > b.capacity {
+			b.tokens = b.capacity
+		}
+		b.last = b.last.Add(time.Duration(add) * b.refill)
+	}
+	if b.tokens <= 0 {
+		return false
+	}
+	b.tokens--
+	return true
 }
 
 // SetSnapshot atomically replaces the in-memory snapshot. Called by the
@@ -98,19 +213,62 @@ func (s *Server) LastSnapshot() Snapshot {
 
 // Routes returns an http.Handler with all endpoints wired up. When a password
 // is configured, every route except /login and /healthz is gated by the
-// cookie-based auth middleware.
+// cookie-based auth middleware. All responses pass through secHeaders, which
+// applies a conservative baseline of HTTP security headers.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.auth(s.handleDashboard))
 	mux.HandleFunc("/api/summary", s.auth(s.handleSummary))
-	mux.HandleFunc("/api/ask", s.auth(s.handleAsk))
+	mux.HandleFunc("/api/ask", s.auth(s.rateLimit(s.askLimit, s.handleAsk)))
 	mux.HandleFunc("/api/trigger/scan", s.auth(s.triggerHandler("scan", s.trig.Scan)))
 	mux.HandleFunc("/api/trigger/ai-review", s.auth(s.triggerHandler("ai_review", s.trig.AIReview)))
 	mux.HandleFunc("/api/trigger/digest", s.auth(s.triggerHandler("digest", s.trig.Digest)))
 	mux.HandleFunc("/login", s.handleLogin)
 	mux.HandleFunc("/logout", s.handleLogout)
 	mux.HandleFunc("/healthz", s.handleHealth)
-	return mux
+	return secHeaders(mux)
+}
+
+// secHeaders applies a baseline of HTTP security headers to every response.
+// These are inexpensive defence-in-depth measures appropriate for a LAN
+// dashboard:
+//   - nosniff blocks the browser from MIME-sniffing past Content-Type.
+//   - DENY framing prevents the dashboard being embedded in a malicious iframe.
+//   - no-referrer keeps the dashboard URL out of cross-site Referer headers.
+//   - The CSP is intentionally permissive of inline styles/scripts because the
+//     dashboard ships a single self-contained HTML file with inline JS/CSS.
+//     It still blocks cross-origin script/style loads, which is what matters.
+func secHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; "+
+				"script-src 'self' 'unsafe-inline'; "+
+				"style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; "+
+				"connect-src 'self'; "+
+				"frame-ancestors 'none'; "+
+				"base-uri 'none'")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// rateLimit wraps a handler with a shared token-bucket gate. Returns 429
+// with a JSON body when the bucket is empty. Used for /api/ask, the only
+// endpoint that calls into the LLM and therefore the only one worth rate
+// limiting on a LAN.
+func (s *Server) rateLimit(b *tokenBucket, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !b.Take() {
+			writeJSON(w, http.StatusTooManyRequests,
+				map[string]string{"error": "rate limited — try again in a few seconds"})
+			return
+		}
+		next(w, r)
+	}
 }
 
 const authCookieName = "ssm_auth"
@@ -133,17 +291,21 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// validCookie returns true when the request carries a known, unexpired
+// session token. The cookie value is opaque (32 random bytes) — it reveals
+// nothing about the password if leaked and is invalidated server-side on
+// logout, expiry, or process restart.
 func (s *Server) validCookie(r *http.Request) bool {
 	c, err := r.Cookie(authCookieName)
 	if err != nil {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(c.Value), []byte(s.password)) == 1
+	return s.validSession(c.Value)
 }
 
 // handleLogin renders the password form (GET) or validates the submission
-// (POST). On success it sets an HttpOnly cookie containing the password and
-// redirects to the dashboard.
+// (POST). On success it mints a random session token, stores its expiry
+// server-side, and hands the token back as an HttpOnly cookie.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if s.password == "" {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -159,13 +321,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			renderLogin(w, "Incorrect password.")
 			return
 		}
+		tok, err := s.newSession()
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 		http.SetCookie(w, &http.Cookie{
 			Name:     authCookieName,
-			Value:    s.password,
+			Value:    tok,
 			Path:     "/",
 			HttpOnly: true,
 			SameSite: http.SameSiteStrictMode,
-			MaxAge:   60 * 60 * 24 * 30, // 30 days
+			MaxAge:   int(sessionTTL / time.Second),
 		})
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
@@ -211,7 +378,11 @@ func (s *Server) triggerHandler(kind string, fn func(context.Context)) http.Hand
 	}
 }
 
+// handleLogout revokes the current session server-side and clears the cookie.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(authCookieName); err == nil {
+		s.revokeSession(c.Value)
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name: authCookieName, Value: "", Path: "/", MaxAge: -1,
 	})

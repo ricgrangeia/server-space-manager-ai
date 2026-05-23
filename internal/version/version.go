@@ -1,20 +1,26 @@
-// Package version exposes build-time metadata baked into the binary via -ldflags.
+// Package version exposes the release identity of the binary.
 //
-// Set at build time:
+// Version is the single source of truth and lives in source — bump it here
+// when cutting a release, then tag the git commit to match.
 //
-//	go build -ldflags "-X github.com/ricgrangeia/server-space-manager-ai/internal/version.Version=$(git describe --tags --always) \
-//	                   -X github.com/ricgrangeia/server-space-manager-ai/internal/version.Commit=$(git rev-parse --short HEAD) \
-//	                   -X github.com/ricgrangeia/server-space-manager-ai/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+// Commit and Date are optional build-time provenance, injected via -ldflags
+// when available (e.g. from a release workflow). They default to "none" /
+// "unknown" for local builds, which is fine — Version alone identifies the
+// release.
+//
+//	go build -ldflags "\
+//	    -X github.com/ricgrangeia/server-space-manager-ai/internal/version.Commit=$(git rev-parse --short HEAD) \
+//	    -X github.com/ricgrangeia/server-space-manager-ai/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 package version
 
-// Version is the semantic version of the build (e.g. "v0.1.0"). Defaults to "dev"
-// when built without -ldflags.
-var Version = "dev"
+// Version is the semantic version of this release. Bump here, then git tag.
+const Version = "v0.2.0"
 
-// Commit is the short git SHA the binary was built from.
+// Commit is the short git SHA the binary was built from. Optional; set via
+// -ldflags. Defaults to "none" for local builds.
 var Commit = "none"
 
-// Date is the build timestamp in RFC3339 form.
+// Date is the build timestamp in RFC3339 form. Optional; set via -ldflags.
 var Date = "unknown"
 
 // String returns a single-line description of the build, suitable for /healthz.

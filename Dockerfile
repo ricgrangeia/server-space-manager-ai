@@ -3,7 +3,9 @@
 # ---- build stage ----------------------------------------------------------
 FROM golang:1.25-alpine AS build
 
-ARG VERSION=dev
+# Version lives in source (internal/version.Version). Commit and BUILD_DATE
+# are optional provenance — pass via --build-arg in a release workflow if you
+# want them baked in; otherwise they default to "none" / "unknown".
 ARG COMMIT=none
 ARG BUILD_DATE=unknown
 
@@ -19,7 +21,6 @@ COPY . .
 # (pure Go), so no libc dependency is required.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
     -ldflags "-s -w \
-        -X github.com/ricgrangeia/server-space-manager-ai/internal/version.Version=${VERSION} \
         -X github.com/ricgrangeia/server-space-manager-ai/internal/version.Commit=${COMMIT} \
         -X github.com/ricgrangeia/server-space-manager-ai/internal/version.Date=${BUILD_DATE}" \
     -o /out/ssm ./cmd/ssm
