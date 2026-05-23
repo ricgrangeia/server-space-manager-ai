@@ -125,13 +125,20 @@ Key sections:
 
 ## Security model
 
-- The manager talks to Docker through **tecnativa/docker-socket-proxy** with
-  only `CONTAINERS`, `IMAGES`, `VOLUMES`, `INFO` enabled. `POST` is denied,
-  so even if the manager is compromised it cannot `exec`, `create`, or
-  `delete` anything.
+- The Docker socket is mounted **read-only** at `/var/run/docker.sock:ro`.
+  The Go HTTP client only issues GET requests against four endpoints
+  (`/containers/json`, `/containers/{id}/json`, `/system/df`, `/volumes`).
+  Even though the daemon runs as root inside the container, the read-only
+  mount blocks Docker API writes at the kernel level. If you want
+  defense-in-depth, put `tecnativa/docker-socket-proxy` or
+  `wollomatic/socket-proxy` in front and set
+  `docker.host: "tcp://socket-proxy:2375"` in the config.
 - The host filesystem is mounted **read-only** at `/host:ro`.
-- The container runs as the **non-root** `nonroot:nonroot` user from the
-  distroless base.
+- The container's only writable surface is its own named volume
+  (`ssm-data`, holding the SQLite DB). No write access to the host or to
+  the Docker API.
+- The image is **distroless** — no shell, no package manager, no busybox.
+  Single static Go binary.
 - The dashboard is intended for a **trusted LAN**. The single-password gate
   is a convenience barrier, not a real authentication system. Do not expose
   port 8080 to the public internet — front it with a reverse proxy that

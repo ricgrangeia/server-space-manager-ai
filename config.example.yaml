@@ -21,12 +21,15 @@ retention_days: 90
 # ---------------------------------------------------------------------------
 # Docker
 # ---------------------------------------------------------------------------
-# We talk to Docker through tecnativa/docker-socket-proxy, which exposes a
-# read-only subset of the API. This keeps a compromised manager container
-# from being able to exec/create/delete anything on the host.
+# We talk to Docker directly over the Unix socket (read-only mount, see
+# docker-compose.yml). The Go HTTP client only ever issues GET requests
+# (containers/json, containers/{id}/json, system/df, volumes), so the
+# socket's write capability is unused — but if you want a hard guarantee
+# you can put tecnativa/docker-socket-proxy or wollomatic/socket-proxy
+# in front and set host: "tcp://socket-proxy:2375".
 docker:
   enabled: true
-  host: "tcp://socket-proxy:2375"
+  host: "unix:///var/run/docker.sock"
   track_volumes: true
   track_images: true
   track_logs: true

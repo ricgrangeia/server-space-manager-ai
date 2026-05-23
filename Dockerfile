@@ -25,7 +25,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
     -o /out/ssm ./cmd/ssm
 
 # ---- runtime stage --------------------------------------------------------
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12
 
 LABEL org.opencontainers.image.title="server-space-manager-ai"
 LABEL org.opencontainers.image.description="Lightweight Go daemon that tracks Docker and host disk usage and answers questions via a local LLM."
@@ -34,8 +34,17 @@ LABEL org.opencontainers.image.licenses="MIT"
 
 COPY --from=build /out/ssm /usr/local/bin/ssm
 
-# /var/lib/ssm holds the SQLite DB, /etc/ssm holds the config.
-USER nonroot:nonroot
+# Bake a sensible default config into the image so the container starts
+# even when no config.yaml is mounted from the host (e.g. Portainer git
+# stacks where the file isn't checked in). Operators override individual
+# values via SSM_* environment variables.
+COPY config.example.yaml /etc/ssm/config.yaml
+
+# Runs as root inside the container so it can read /var/run/docker.sock
+# (typically owned by root:docker on the host). The container itself has
+# only read-only mounts (/, the docker socket, the config) plus its own
+# private named volume for SQLite — the writable surface is tiny and the
+# binary issues GET-only requests against the Docker API.
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/ssm"]

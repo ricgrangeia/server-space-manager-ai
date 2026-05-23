@@ -1,9 +1,9 @@
 # Server Space Manager — Portainer-compatible stack.
 #
-# This file is designed for Portainer's "Git stack" deployment: Portainer
-# clones the repo and runs `docker compose up -d` on the configured agent.
-# Environment variables come from the Portainer stack UI and are interpolated
-# into the file below using the standard ${VAR} syntax.
+# Designed for Portainer's "Git stack" deployment: Portainer clones the repo
+# and runs `docker compose up -d` on the configured agent. Environment
+# variables come from the Portainer stack UI (or a local .env file) and are
+# interpolated using the standard ${VAR} syntax.
 #
 # The stack expects an already-existing external network where your vLLM
 # container lives (default name: ai-network). Override via VLLM_NETWORK.
@@ -11,14 +11,19 @@
 services:
 
   # ----------------------------------------------------------------------
-  # The manager itself. Runs the scan loop, exposes the dashboard, talks
-  # to vLLM and Telegram. Read-only on the host: mounts / at /host:ro.
+  # The manager itself.
+  #
+  # - Builds from the cloned repo by default. Override SSM_IMAGE in the
+  #   stack env once you publish a pre-built image to a registry.
+  # - Mounts the host root read-only at /host so the scanner can sum
+  #   filesystem and log/volume sizes without any write capability.
+  # - Mounts the Docker socket read-only so it can list containers,
+  #   volumes, and images. The Go HTTP client only ever issues GET
+  #   requests against the Engine API. If you want a hard guarantee at
+  #   the kernel/policy level, put a socket-proxy in front and switch
+  #   docker.host in the config to its TCP endpoint.
   # ----------------------------------------------------------------------
   ssm:
-    # Build from the repo by default — this is what Portainer git stacks do.
-    # Once you publish a pre-built image to a registry, override SSM_IMAGE in
-    # the stack env and remove (or comment out) the build: block to skip the
-    # build step on every redeploy.
     image: ${SSM_IMAGE:-server-space-manager-ai:local}
     build:
       context: .
@@ -26,14 +31,13 @@ services:
         VERSION: ${SSM_VERSION:-dev}
     container_name: ssm
     restart: unless-stopped
-    depends_on:
-      - socket-proxy
     environment:
       SSM_CONFIG: /etc/ssm/config.yaml
       SSM_DB: /var/lib/ssm/ssm.db
-      # Secrets are sourced from .env (or Portainer stack env vars) so the
-      # committed config.yaml can stay free of credentials. The Go config
-      # loader overrides the equivalent YAML fields when these are set.
+      # Secrets and per-environment values come from .env (or Portainer
+      # stack env). The Go config loader overlays these on top of the
+      # config.yaml baked into the image, so credentials never need to
+      # live in a file on disk.
       SSM_HTTP_PASSWORD: ${SSM_HTTP_PASSWORD:-}
       SSM_LLM_BASE_URL: ${LLM_BASE_URL:-}
       SSM_LLM_MODEL: ${LLM_MODEL:-}
@@ -42,38 +46,13 @@ services:
       SSM_TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       SSM_TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
     volumes:
-      - ./config.yaml:/etc/ssm/config.yaml:ro
       - ssm-data:/var/lib/ssm
-      # Host root mounted read-only so the scanner can sum log/volume sizes
-      # without any write capability.
       - /:/host:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - "${SSM_PORT:-8080}:8080"
     networks:
-      - ssm-internal
       - ai-network
-    security_opt:
-      - no-new-privileges:true
-
-  # ----------------------------------------------------------------------
-  # Read-only Docker socket proxy. Only the API surface needed for
-  # listing/inspecting containers, volumes, images, and df is exposed.
-  # ----------------------------------------------------------------------
-  socket-proxy:
-    image: tecnativa/docker-socket-proxy:0.3.0
-    container_name: ssm-socket-proxy
-    restart: unless-stopped
-    environment:
-      CONTAINERS: 1
-      IMAGES: 1
-      VOLUMES: 1
-      INFO: 1
-      # Everything else stays at 0 (POST denied).
-      POST: 0
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - ssm-internal
     security_opt:
       - no-new-privileges:true
 
@@ -81,9 +60,6 @@ volumes:
   ssm-data:
 
 networks:
-  # Private network for ssm <-> socket-proxy traffic.
-  ssm-internal:
-    driver: bridge
   # External network where your vLLM container lives. Create it once on the
   # host with: `docker network create ai-network` (or rename to match).
   ai-network:
