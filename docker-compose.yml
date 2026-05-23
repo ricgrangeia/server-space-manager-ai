@@ -28,7 +28,13 @@ services:
     build:
       context: .
       args:
+        # VERSION is the one you'll usually bump (e.g. v0.1.0). COMMIT and
+        # BUILD_DATE are optional — Portainer git stacks don't auto-populate
+        # them, but you can set them in the stack env if you want full
+        # build provenance in the version string and Telegram startup ping.
         VERSION: ${SSM_VERSION:-dev}
+        COMMIT: ${SSM_COMMIT:-none}
+        BUILD_DATE: ${SSM_BUILD_DATE:-unknown}
     container_name: ssm
     restart: unless-stopped
     environment:
