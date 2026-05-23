@@ -7,6 +7,7 @@
 
 # local config / state — never commit secrets
 /config.yaml
+/.env
 /data/
 *.db
 *.db-journal
@@ -18,3 +19,4 @@
 .idea/
 .DS_Store
 Thumbs.db
+/.history

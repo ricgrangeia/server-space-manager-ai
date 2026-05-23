@@ -6,7 +6,7 @@
 # into the file below using the standard ${VAR} syntax.
 #
 # The stack expects an already-existing external network where your vLLM
-# container lives (default name: vllm-net). Override via VLLM_NETWORK.
+# container lives (default name: ai-network). Override via VLLM_NETWORK.
 
 services:
 
@@ -28,6 +28,16 @@ services:
     environment:
       SSM_CONFIG: /etc/ssm/config.yaml
       SSM_DB: /var/lib/ssm/ssm.db
+      # Secrets are sourced from .env (or Portainer stack env vars) so the
+      # committed config.yaml can stay free of credentials. The Go config
+      # loader overrides the equivalent YAML fields when these are set.
+      SSM_HTTP_PASSWORD: ${SSM_HTTP_PASSWORD:-}
+      SSM_LLM_BASE_URL: ${LLM_BASE_URL:-}
+      SSM_LLM_MODEL: ${LLM_MODEL:-}
+      SSM_LLM_API_KEY: ${LLM_API_KEY:-}
+      SSM_TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-false}
+      SSM_TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      SSM_TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
     volumes:
       - ./config.yaml:/etc/ssm/config.yaml:ro
       - ssm-data:/var/lib/ssm
@@ -38,7 +48,7 @@ services:
       - "${SSM_PORT:-8080}:8080"
     networks:
       - ssm-internal
-      - vllm-net
+      - ai-network
     security_opt:
       - no-new-privileges:true
 
@@ -72,7 +82,7 @@ networks:
   ssm-internal:
     driver: bridge
   # External network where your vLLM container lives. Create it once on the
-  # host with: `docker network create vllm-net` (or rename to match).
-  vllm-net:
-    name: ${VLLM_NETWORK:-vllm-net}
+  # host with: `docker network create ai-network` (or rename to match).
+  ai-network:
+    name: ${VLLM_NETWORK:-ai-network}
     external: true

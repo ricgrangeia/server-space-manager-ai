@@ -73,7 +73,7 @@ Built to live on a Portainer git stack, alongside your existing vLLM.
 1. **Create the shared network** on your host (one-time):
 
    ```sh
-   docker network create vllm-net
+   docker network create ai-network
    ```
 
    Make sure your vLLM container joins this network too.
@@ -89,7 +89,7 @@ Built to live on a Portainer git stack, alongside your existing vLLM.
    | --------------- | ----------------------------------------------- | ------------------------------------------ |
    | `SSM_IMAGE`     | `ghcr.io/ricgrangeia/server-space-manager-ai:latest` | Image to pull (override or use `build:`) |
    | `SSM_PORT`      | `8080`                                          | Host port for the dashboard                |
-   | `VLLM_NETWORK`  | `vllm-net`                                      | External network with your vLLM container  |
+   | `VLLM_NETWORK`  | `ai-network`                                      | External network with your vLLM container  |
 
 4. **Deploy.** Visit `http://<host>:8080`, log in with the password from
    `config.yaml`.

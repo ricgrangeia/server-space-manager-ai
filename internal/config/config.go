@@ -138,5 +138,37 @@ func Load(path string) (*Config, error) {
 	if c.HTTP.Listen == "" {
 		c.HTTP.Listen = ":8080"
 	}
+
+	applyEnvOverrides(&c)
 	return &c, nil
+}
+
+// applyEnvOverrides lets operators inject secrets via environment variables
+// (typically a Portainer stack env or a local .env file) instead of baking
+// them into config.yaml. Any non-empty value here wins over the YAML value.
+//
+// This keeps the committed config.yaml free of credentials and makes
+// password rotation a stack-restart instead of a file edit.
+func applyEnvOverrides(c *Config) {
+	if v := os.Getenv("SSM_HTTP_PASSWORD"); v != "" {
+		c.HTTP.Password = v
+	}
+	if v := os.Getenv("SSM_LLM_BASE_URL"); v != "" {
+		c.LLM.BaseURL = v
+	}
+	if v := os.Getenv("SSM_LLM_MODEL"); v != "" {
+		c.LLM.Model = v
+	}
+	if v := os.Getenv("SSM_LLM_API_KEY"); v != "" {
+		c.LLM.APIKey = v
+	}
+	if v := os.Getenv("SSM_TELEGRAM_ENABLED"); v == "true" || v == "1" {
+		c.Telegram.Enabled = true
+	}
+	if v := os.Getenv("SSM_TELEGRAM_BOT_TOKEN"); v != "" {
+		c.Telegram.BotToken = v
+	}
+	if v := os.Getenv("SSM_TELEGRAM_CHAT_ID"); v != "" {
+		c.Telegram.ChatID = v
+	}
 }
