@@ -64,7 +64,12 @@ services:
         max-file: "5"
 
 volumes:
+  # Pin the volume to a stable absolute name (not "{project}_ssm-data") so the
+  # SQLite history survives stack renames and recreates in Portainer. Without
+  # this, redeploying with a different stack name would orphan the old volume
+  # and start with a fresh DB — losing all scan history.
   ssm-data:
+    name: ssm-data
 
 networks:
   # External network where your vLLM container lives. Create it once on the

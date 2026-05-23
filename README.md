@@ -47,6 +47,8 @@ Built to live on a Portainer git stack, alongside your existing vLLM.
 
 ## Architecture
 
+![Architecture](docs/architecture.svg)
+
 ```text
             ┌────────────────────┐
             │  Portainer stack   │

@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0e1116"/>
+      <stop offset="1" stop-color="#161b22"/>
+    </linearGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1f6feb"/>
+      <stop offset="1" stop-color="#238636"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3fb950"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#58a6ff"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1000" height="620" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="500" y="44" text-anchor="middle" fill="#e6edf3" font-size="22" font-weight="600">Server Space Manager AI</text>
+  <text x="500" y="68" text-anchor="middle" fill="#8b949e" font-size="13">Lightweight Go daemon · Docker + host disk usage · local LLM · Telegram</text>
+
+  <!-- ===== Core box ===== -->
+  <g filter="url(#glow)">
+    <rect x="370" y="220" width="260" height="180" rx="14" fill="url(#core)" opacity="0.95"/>
+  </g>
+  <rect x="370" y="220" width="260" height="180" rx="14" fill="none" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="500" y="252" text-anchor="middle" fill="#fff" font-size="16" font-weight="700">ssm</text>
+  <text x="500" y="270" text-anchor="middle" fill="#c9ecff" font-size="11">single Go binary · 21 MB distroless</text>
+
+  <g font-size="12" fill="#e8f4ff">
+    <text x="390" y="298">• Scanner</text>
+    <text x="390" y="318">• Baseline anomaly engine</text>
+    <text x="390" y="338">• AI review &amp; digest</text>
+    <text x="390" y="358">• HTTP API + dashboard</text>
+    <text x="390" y="378">• Cron scheduler</text>
+  </g>
+
+  <!-- ===== Left column: inputs ===== -->
+  <g>
+    <!-- Docker socket -->
+    <rect x="40" y="180" width="220" height="78" rx="10" fill="#161b22" stroke="#30363d"/>
+    <text x="150" y="208" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">Docker Engine</text>
+    <text x="150" y="226" text-anchor="middle" fill="#8b949e" font-size="11">/var/run/docker.sock :ro</text>
+    <text x="150" y="244" text-anchor="middle" fill="#8b949e" font-size="11">GET-only: containers, df, volumes</text>
+
+    <!-- Host filesystem -->
+    <rect x="40" y="290" width="220" height="78" rx="10" fill="#161b22" stroke="#30363d"/>
+    <text x="150" y="318" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">Host filesystem</text>
+    <text x="150" y="336" text-anchor="middle" fill="#8b949e" font-size="11">/ → /host :ro</text>
+    <text x="150" y="354" text-anchor="middle" fill="#8b949e" font-size="11">walk + statfs configured paths</text>
+
+    <!-- arrows in -->
+    <path d="M 260 219 C 320 219, 320 270, 370 270" stroke="#8b949e" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <path d="M 260 329 C 320 329, 320 310, 370 310" stroke="#8b949e" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- ===== Right column: integrations ===== -->
+  <g>
+    <!-- vLLM -->
+    <rect x="740" y="120" width="220" height="78" rx="10" fill="#161b22" stroke="#3fb950"/>
+    <text x="850" y="148" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">Local LLM</text>
+    <text x="850" y="166" text-anchor="middle" fill="#8b949e" font-size="11">vLLM · Qwen3-8B</text>
+    <text x="850" y="184" text-anchor="middle" fill="#8b949e" font-size="11">OpenAI-compatible API</text>
+
+    <!-- Dashboard -->
+    <rect x="740" y="230" width="220" height="78" rx="10" fill="#161b22" stroke="#58a6ff"/>
+    <text x="850" y="258" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">Dashboard (LAN)</text>
+    <text x="850" y="276" text-anchor="middle" fill="#8b949e" font-size="11">Embedded HTML · port 8080</text>
+    <text x="850" y="294" text-anchor="middle" fill="#8b949e" font-size="11">password-gated · Ask the AI</text>
+
+    <!-- Telegram -->
+    <rect x="740" y="340" width="220" height="78" rx="10" fill="#161b22" stroke="#d29922"/>
+    <text x="850" y="368" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">Telegram alerts</text>
+    <text x="850" y="386" text-anchor="middle" fill="#8b949e" font-size="11">Bot API · dedup 30 min</text>
+    <text x="850" y="404" text-anchor="middle" fill="#8b949e" font-size="11">rules + AI verdicts + digest</text>
+
+    <!-- arrows out -->
+    <path d="M 630 270 C 690 270, 690 159, 740 159" stroke="#3fb950" stroke-width="1.5" fill="none" marker-end="url(#arrow-green)"/>
+    <path d="M 630 300 C 690 300, 690 269, 740 269" stroke="#58a6ff" stroke-width="1.5" fill="none" marker-end="url(#arrow-blue)"/>
+    <path d="M 630 340 C 690 340, 690 379, 740 379" stroke="#d29922" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- ===== Bottom: SQLite ===== -->
+  <g>
+    <rect x="370" y="450" width="260" height="84" rx="10" fill="#161b22" stroke="#30363d"/>
+    <text x="500" y="478" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">SQLite history</text>
+    <text x="500" y="496" text-anchor="middle" fill="#8b949e" font-size="11">samples · findings · 90-day retention</text>
+    <text x="500" y="514" text-anchor="middle" fill="#8b949e" font-size="11">powers per-item growth baselines</text>
+    <path d="M 500 400 L 500 450" stroke="#8b949e" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- ===== Cron schedules (bottom-left) ===== -->
+  <g>
+    <rect x="40" y="450" width="220" height="84" rx="10" fill="#161b22" stroke="#30363d"/>
+    <text x="60" y="478" fill="#e6edf3" font-size="13" font-weight="600">Cron schedules</text>
+    <g font-size="11" fill="#8b949e">
+      <text x="60" y="498">scan      <tspan fill="#c9d1d9">@every 1h</tspan></text>
+      <text x="60" y="514">ai_review <tspan fill="#c9d1d9">0 */6 * * *</tspan></text>
+      <text x="60" y="530">digest    <tspan fill="#c9d1d9">0 8 * * *</tspan></text>
+    </g>
+  </g>
+
+  <!-- ===== Manual triggers (bottom-right) ===== -->
+  <g>
+    <rect x="740" y="450" width="220" height="84" rx="10" fill="#161b22" stroke="#30363d"/>
+    <text x="760" y="478" fill="#e6edf3" font-size="13" font-weight="600">Manual triggers</text>
+    <g font-size="11" fill="#8b949e">
+      <text x="760" y="498">/api/trigger/scan</text>
+      <text x="760" y="514">/api/trigger/ai-review</text>
+      <text x="760" y="530">/api/trigger/digest</text>
+    </g>
+  </g>
+
+  <!-- Footer -->
+  <text x="500" y="592" text-anchor="middle" fill="#6e7681" font-size="11">
+    Read-only · runs on Portainer · single container · github.com/ricgrangeia/server-space-manager-ai
+  </text>
+</svg>
