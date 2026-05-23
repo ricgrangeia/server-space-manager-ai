@@ -112,16 +112,20 @@ func main() {
 	scheduler.Start()
 	defer func() { <-scheduler.Stop().Done() }()
 
-	// Always run one scan synchronously at startup so the dashboard isn't
-	// empty until the first cron tick.
-	runScan(ctx, cfg, st, host, dock, srv, notifier, rules)
-
+	// Start the HTTP server BEFORE the first scan. The startup scan can take
+	// a while on first run (large bind mounts, lots of containers); we don't
+	// want the dashboard unreachable while it churns. The summary endpoint
+	// will return an empty snapshot until the first scan completes.
 	log.Printf("HTTP listening on %s", cfg.HTTP.Listen)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
 			log.Fatalf("http: %v", err)
 		}
 	}()
+
+	// Kick off the first scan in the background so it doesn't block startup.
+	// Subsequent scans are driven by the cron scheduler.
+	go runScan(ctx, cfg, st, host, dock, srv, notifier, rules)
 
 	<-ctx.Done()
 	log.Printf("shutting down")
