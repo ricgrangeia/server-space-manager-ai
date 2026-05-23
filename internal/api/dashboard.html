@@ -47,6 +47,23 @@
   .bar { background: #21262d; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 4px; }
   .bar > div { height: 100%; background: linear-gradient(90deg, #3fb950, #d29922 70%, #f85149 90%); }
   .alert { padding: 8px 12px; background: #3d1d1d; border: 1px solid #6e2222; border-radius: 6px; margin-bottom: 8px; font-size: 13px; }
+  /* Findings card */
+  .finding { padding: 8px 0; border-bottom: 1px solid #21262d; font-size: 13px; display: grid;
+             grid-template-columns: 14px auto 1fr; column-gap: 8px; align-items: start; }
+  .finding:last-child { border-bottom: 0; }
+  .finding .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; }
+  .dot.info { background: #58a6ff; }
+  .dot.warn { background: #d29922; }
+  .dot.crit { background: #f85149; }
+  .badge { font-size: 11px; padding: 1px 6px; border-radius: 10px; background: #21262d; color: #8b949e; white-space: nowrap; }
+  .badge.ai_review { background: #1f3a5f; color: #a8c7ff; }
+  .badge.rules { background: #3a2f17; color: #f0c674; }
+  .reason { color: #c9d1d9; }
+  .meta { color: #8b949e; font-size: 11px; margin-top: 2px; overflow-wrap: anywhere; }
+  .filters { display: flex; gap: 6px; margin-bottom: 8px; }
+  .filters button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 12px;
+                    padding: 2px 10px; font-size: 12px; cursor: pointer; }
+  .filters button.active { background: #1f3a5f; border-color: #58a6ff; color: #fff; }
   .ask { display: flex; gap: 8px; margin-top: 12px; }
   .ask input { flex: 1; padding: 8px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; }
   .ask button { padding: 8px 14px; background: #238636; border: 0; border-radius: 6px; color: white; cursor: pointer; }
@@ -88,6 +105,16 @@
     <div class="card">
       <h2>Recent alerts</h2>
       <div id="alerts"><div class="muted">No alerts.</div></div>
+    </div>
+
+    <div class="card" style="grid-column: span 2;">
+      <h2>Findings <span class="muted" style="font-weight:400; text-transform:none">— last 7 days</span></h2>
+      <div class="filters">
+        <button data-filter=""          class="active" onclick="setFilter(this, '')">All</button>
+        <button data-filter="ai_review"               onclick="setFilter(this, 'ai_review')">AI review</button>
+        <button data-filter="rules"                   onclick="setFilter(this, 'rules')">Rule alerts</button>
+      </div>
+      <div id="findings"><div class="muted">Loading…</div></div>
     </div>
 
     <div class="card">
@@ -169,6 +196,56 @@ function fill(sel, items) {
   const body = document.querySelector(sel); body.innerHTML = "";
   (items || []).forEach(x => body.appendChild(row([x.label, human(x.bytes)])));
 }
+// Findings card — filter + fetch
+let findingsFilter = "";
+function setFilter(btn, kind) {
+  findingsFilter = kind;
+  document.querySelectorAll(".filters button").forEach(b => b.classList.toggle("active", b === btn));
+  loadFindings();
+}
+async function loadFindings() {
+  const el = document.getElementById("findings");
+  const q = findingsFilter ? "?source=" + encodeURIComponent(findingsFilter) : "";
+  try {
+    const rows = await fetch("/api/findings" + q).then(r => r.json());
+    if (!Array.isArray(rows) || rows.length === 0) {
+      el.innerHTML = '<div class="muted">No findings yet. AI review runs every 6 hours by default; rule alerts fire when thresholds are crossed.</div>';
+      return;
+    }
+    el.innerHTML = "";
+    for (const f of rows) {
+      const row = document.createElement("div");
+      row.className = "finding";
+
+      const dot = document.createElement("div");
+      dot.className = "dot " + (f.severity || "info");
+      row.appendChild(dot);
+
+      const badge = document.createElement("span");
+      badge.className = "badge " + (f.source || "");
+      badge.textContent = (f.source || "?").replace("_", " ");
+      row.appendChild(badge);
+
+      const right = document.createElement("div");
+      const reason = document.createElement("div");
+      reason.className = "reason";
+      reason.textContent = f.reason || "";
+      right.appendChild(reason);
+
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const when = new Date(f.created_at).toLocaleString();
+      const where = (f.kind && f.kind !== "rule") ? (f.kind + " · " + f.key) : "";
+      meta.textContent = when + (where ? "  ·  " + where : "");
+      right.appendChild(meta);
+
+      row.appendChild(right);
+      el.appendChild(row);
+    }
+  } catch (e) {
+    el.innerHTML = '<div class="muted">Error loading findings: ' + e.message + '</div>';
+  }
+}
 async function trigger(kind, btn) {
   const status = document.getElementById("trig-status");
   btn.disabled = true;
@@ -207,7 +284,8 @@ async function ask() {
   }
 }
 refresh();
-setInterval(refresh, 15000);
+loadFindings();
+setInterval(() => { refresh(); loadFindings(); }, 15000);
 </script>
 </body>
 </html>

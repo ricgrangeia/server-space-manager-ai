@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -219,6 +220,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.auth(s.handleDashboard))
 	mux.HandleFunc("/api/summary", s.auth(s.handleSummary))
+	mux.HandleFunc("/api/findings", s.auth(s.handleFindings))
 	mux.HandleFunc("/api/ask", s.auth(s.rateLimit(s.askLimit, s.handleAsk)))
 	mux.HandleFunc("/api/trigger/scan", s.auth(s.triggerHandler("scan", s.trig.Scan)))
 	mux.HandleFunc("/api/trigger/ai-review", s.auth(s.triggerHandler("ai_review", s.trig.AIReview)))
@@ -470,6 +472,74 @@ type summaryResp struct {
 	TopPaths    []summaryItem `json:"top_paths"`
 	TopImages   []summaryItem `json:"top_images"`
 	TopFiles    []summaryItem `json:"top_files"`
+}
+
+// findingItem is the dashboard-friendly view of a persisted finding.
+type findingItem struct {
+	CreatedAt time.Time `json:"created_at"`
+	Source    string    `json:"source"`   // rules | ai_review | digest
+	Severity  string    `json:"severity"` // info | warn | crit
+	Kind      string    `json:"kind"`
+	Key       string    `json:"key"`
+	Reason    string    `json:"reason"`
+}
+
+// handleFindings returns recent persisted findings, newest first. Default
+// window is 7 days, capped at 50 rows. Supports two optional query
+// parameters:
+//
+//	?source=ai_review|rules   filter to a single producer
+//	?limit=N                  cap rows (1-200)
+//
+// Used by the dashboard's "Findings" card to surface AI review verdicts
+// alongside rule-engine fires, which previously only appeared in Telegram.
+func (s *Server) handleFindings(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeJSON(w, http.StatusOK, []findingItem{})
+		return
+	}
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+	source := r.URL.Query().Get("source") // empty = all
+	since := time.Now().Add(-7 * 24 * time.Hour)
+
+	// RecentFindings already orders DESC by created_at. We pull a bit more
+	// than `limit` when filtering by source so the filtered slice still
+	// reaches the requested count without a second SQL query.
+	pull := limit
+	if source != "" {
+		pull = limit * 4
+		if pull > 200 {
+			pull = 200
+		}
+	}
+	rows, err := s.store.RecentFindings(since, pull)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	out := make([]findingItem, 0, len(rows))
+	for _, f := range rows {
+		if source != "" && f.Source != source {
+			continue
+		}
+		out = append(out, findingItem{
+			CreatedAt: f.CreatedAt,
+			Source:    f.Source,
+			Severity:  f.Severity,
+			Kind:      f.Kind,
+			Key:       f.Key,
+			Reason:    f.Reason,
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, _ *http.Request) {
