@@ -17,11 +17,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -108,30 +112,53 @@ func main() {
 	// functions the cron scheduler invokes. We construct the *Server later
 	// (after triggers point at it for SetSnapshot) by deferring the call to
 	// runScan through a closure that captures srv.
+	// notifyManual wraps a manual-trigger job with "started" / "finished"
+	// Telegram pings. Cron-driven jobs stay silent so the bot doesn't ping
+	// every hour — the existing rule alerts and AI verdicts already cover
+	// the noteworthy events. We use a fresh dedupe key per run (timestamp)
+	// so the start message is never suppressed by the Telegram dedupe
+	// window in alert.Telegram.
+	notifyManual := func(label string, fn func(context.Context) string) func(context.Context) {
+		return func(c context.Context) {
+			startedKey := fmt.Sprintf("manual:%s:start:%d", label, time.Now().UnixNano())
+			_ = notifier.Send(c, startedKey, "▶️ *"+label+"* started (manual trigger)")
+			t0 := time.Now()
+			summary := fn(c)
+			dur := time.Since(t0).Round(time.Second)
+			doneKey := fmt.Sprintf("manual:%s:done:%d", label, time.Now().UnixNano())
+			msg := fmt.Sprintf("✅ *%s* finished in %s", label, dur)
+			if summary != "" {
+				msg += " — " + summary
+			}
+			_ = notifier.Send(c, doneKey, msg)
+		}
+	}
+
 	var srv *api.Server
 	triggers := api.Triggers{
-		Scan: func(c context.Context) { runScan(c, cfg, st, host, dock, srv, notifier, rules) },
-		AIReview: func(c context.Context) {
+		Scan: notifyManual("scan", func(c context.Context) string {
+			runScan(c, cfg, st, host, dock, srv, notifier, rules)
+			return buildScanReport(srv.LastSnapshot())
+		}),
+		AIReview: notifyManual("AI review", func(c context.Context) string {
 			if reviewer.LLM == nil {
-				log.Printf("manual ai_review skipped: llm disabled")
-				return
+				return "skipped (LLM disabled)"
 			}
 			findings, err := reviewer.RunReview(c)
 			if err != nil {
-				log.Printf("manual ai_review: %v", err)
-				return
+				return "error: " + err.Error()
 			}
-			log.Printf("manual ai_review fired %d findings", len(findings))
-		},
-		Digest: func(c context.Context) {
+			return fmt.Sprintf("%d findings", len(findings))
+		}),
+		Digest: notifyManual("digest", func(c context.Context) string {
 			if reviewer.LLM == nil {
-				log.Printf("manual digest skipped: llm disabled")
-				return
+				return "skipped (LLM disabled)"
 			}
 			if _, err := reviewer.RunDigest(c); err != nil {
-				log.Printf("manual digest: %v", err)
+				return "error: " + err.Error()
 			}
-		},
+			return "sent"
+		}),
 	}
 	srv = api.New(cfg.HTTP.Listen, cfg.HTTP.Password, llmClient, st, triggers)
 	if cfg.HTTP.Password == "" {
@@ -153,12 +180,113 @@ func main() {
 		}
 	}()
 
+	// Telegram "online" ping. Useful after a redeploy: the bot confirms the
+	// new build is running, with the version baked into the binary. The
+	// dedupe key includes the boot time so reboots are never suppressed by
+	// the notifier's 30-minute dedupe window.
+	bootKey := fmt.Sprintf("boot:%d", time.Now().UnixNano())
+	_ = notifier.Send(ctx, bootKey, fmt.Sprintf(
+		"🟢 *ssm online* — %s\nlisten %s · scan %s · ai_review %s · digest %s",
+		version.String(), cfg.HTTP.Listen,
+		cfg.Schedules.Scan, cfg.Schedules.AIReview, cfg.Schedules.Digest))
+
 	// Kick off the first scan in the background so it doesn't block startup.
 	// Subsequent scans are driven by the cron scheduler.
 	go runScan(ctx, cfg, st, host, dock, srv, notifier, rules)
 
 	<-ctx.Done()
 	log.Printf("shutting down")
+}
+
+// buildScanReport formats a short human-readable summary of a snapshot,
+// suitable for a Telegram message body. Markdown-flavoured (Telegram
+// `parse_mode=Markdown`). Sections are skipped if empty so the report
+// stays compact on quiet hosts.
+func buildScanReport(snap api.Snapshot) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d samples, %d alerts", snap.SampleCount, len(snap.Alerts))
+
+	// Filesystems with their % full, sorted by % desc.
+	type fsRow struct {
+		path string
+		pct  float64
+	}
+	var fss []fsRow
+	for _, s := range snap.Samples {
+		if s.Kind != "fs" {
+			continue
+		}
+		var extra struct {
+			Total int64 `json:"total"`
+			Avail int64 `json:"avail"`
+		}
+		if err := json.Unmarshal([]byte(s.Extra), &extra); err == nil && extra.Total > 0 {
+			used := extra.Total - extra.Avail
+			fss = append(fss, fsRow{s.Label, 100 * float64(used) / float64(extra.Total)})
+		}
+	}
+	sort.Slice(fss, func(i, j int) bool { return fss[i].pct > fss[j].pct })
+	if len(fss) > 0 {
+		b.WriteString("\n\n*Filesystems:*")
+		for i, f := range fss {
+			if i >= 3 {
+				break
+			}
+			fmt.Fprintf(&b, "\n• `%s` — %.0f%%", f.path, f.pct)
+		}
+	}
+
+	addTop := func(title, kind string, n int) {
+		var picked []store.Sample
+		for _, s := range snap.Samples {
+			if s.Kind == kind {
+				picked = append(picked, s)
+			}
+		}
+		sort.Slice(picked, func(i, j int) bool { return picked[i].Bytes > picked[j].Bytes })
+		if len(picked) == 0 {
+			return
+		}
+		fmt.Fprintf(&b, "\n\n*%s:*", title)
+		for i, s := range picked {
+			if i >= n {
+				break
+			}
+			fmt.Fprintf(&b, "\n• `%s` — %s", s.Label, humanBytes(s.Bytes))
+		}
+	}
+	addTop("Top container logs", "container_log", 3)
+	addTop("Top volumes", "volume", 3)
+
+	// Up to 3 active alerts, truncated so we don't blow the Telegram message limit.
+	if len(snap.Alerts) > 0 {
+		b.WriteString("\n\n*Alerts:*")
+		for i, a := range snap.Alerts {
+			if i >= 3 {
+				fmt.Fprintf(&b, "\n• (+%d more)", len(snap.Alerts)-i)
+				break
+			}
+			b.WriteString("\n• ")
+			b.WriteString(a)
+		}
+	}
+	return b.String()
+}
+
+// humanBytes formats a byte count with two-letter units (KB, MB, GB…).
+// Kept here rather than imported so cmd/ssm has no cross-package dep
+// just for a one-line helper.
+func humanBytes(b int64) string {
+	const u = 1024
+	if b < u {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(u), 0
+	for n := b / u; n >= u; n /= u {
+		div *= u
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
 // runScan executes one disk-usage pass: walk host paths, query Docker,

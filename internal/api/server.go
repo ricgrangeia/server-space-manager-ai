@@ -87,6 +87,15 @@ func (s *Server) SetSnapshot(snap Snapshot) {
 	s.mu.Unlock()
 }
 
+// LastSnapshot returns a copy of the most-recent snapshot. Used by code
+// outside the package (e.g. the manual-trigger Telegram report) that needs
+// to read the result of the scan that just finished.
+func (s *Server) LastSnapshot() Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.snap
+}
+
 // Routes returns an http.Handler with all endpoints wired up. When a password
 // is configured, every route except /login and /healthz is gated by the
 // cookie-based auth middleware.
