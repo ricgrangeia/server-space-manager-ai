@@ -169,6 +169,22 @@ func main() {
 	scheduler.Start()
 	defer func() { <-scheduler.Stop().Done() }()
 
+	// Restore the most-recent scan from SQLite so the dashboard isn't empty
+	// for the first few minutes after a redeploy. Without this, until the
+	// startup scan completes the UI shows zero containers / zero filesystems
+	// even though the history is intact, which looks indistinguishable from
+	// data loss.
+	if samples, taken, err := st.LatestScan(); err != nil {
+		log.Printf("restore last scan: %v", err)
+	} else if len(samples) > 0 {
+		srv.SetSnapshot(api.Snapshot{
+			TakenAt:     taken,
+			Samples:     samples,
+			SampleCount: len(samples),
+		})
+		log.Printf("restored last scan from %s (%d samples)", taken.Format(time.RFC3339), len(samples))
+	}
+
 	// Start the HTTP server BEFORE the first scan. The startup scan can take
 	// a while on first run (large bind mounts, lots of containers); we don't
 	// want the dashboard unreachable while it churns. The summary endpoint

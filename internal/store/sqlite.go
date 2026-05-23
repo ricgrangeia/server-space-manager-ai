@@ -141,6 +141,37 @@ func (s *Store) Insert(samples []Sample) error {
 	return tx.Commit()
 }
 
+// LatestScan returns every sample from the most recent scan (i.e. all rows
+// whose taken_at equals the max taken_at in the table). Used at startup to
+// restore the dashboard's in-memory snapshot without having to wait for the
+// next scan to complete.
+func (s *Store) LatestScan() ([]Sample, time.Time, error) {
+	var t time.Time
+	if err := s.db.QueryRow(`SELECT MAX(taken_at) FROM samples`).Scan(&t); err != nil {
+		// No rows yet — fresh database.
+		return nil, time.Time{}, nil
+	}
+	if t.IsZero() {
+		return nil, time.Time{}, nil
+	}
+	rows, err := s.db.Query(`
+SELECT kind,key,label,bytes,extra,taken_at FROM samples
+WHERE taken_at = ?`, t)
+	if err != nil {
+		return nil, t, err
+	}
+	defer rows.Close()
+	var out []Sample
+	for rows.Next() {
+		var x Sample
+		if err := rows.Scan(&x.Kind, &x.Key, &x.Label, &x.Bytes, &x.Extra, &x.TakenAt); err != nil {
+			return nil, t, err
+		}
+		out = append(out, x)
+	}
+	return out, t, rows.Err()
+}
+
 // Latest returns the most recent sample per (kind,key) for a given kind.
 func (s *Store) Latest(kind string, limit int) ([]Sample, error) {
 	rows, err := s.db.Query(`
