@@ -252,10 +252,24 @@ func buildScanReport(snap api.Snapshot, st *store.Store) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d samples, %d alerts", snap.SampleCount, len(snap.Alerts))
 
-	// --- Disk overview: every filesystem with bar + bytes ----------------
+	// --- Disk overview: every filesystem with bar + bytes + 24h delta ----
+	// The "delta" lets the operator see at a glance whether a filesystem
+	// is filling up, draining, or steady — which is what "track if it's
+	// growing" boils down to. We pull from store.GrowthSince once and
+	// look up each filesystem's delta locally.
+	deltas := map[string]int64{}
+	if st != nil {
+		if rows, err := st.GrowthSince("fs", time.Now().Add(-24*time.Hour), 100); err == nil {
+			for _, r := range rows {
+				deltas[r.Key] = r.DeltaBytes
+			}
+		}
+	}
+
 	type fsRow struct {
-		path             string
-		used, total, pct float64
+		path                    string
+		used, free, total, pct  float64
+		delta24h                int64
 	}
 	var fss []fsRow
 	for _, s := range snap.Samples {
@@ -269,8 +283,12 @@ func buildScanReport(snap api.Snapshot, st *store.Store) string {
 		if err := json.Unmarshal([]byte(s.Extra), &extra); err == nil && extra.Total > 0 {
 			used := float64(extra.Total - extra.Avail)
 			fss = append(fss, fsRow{
-				path: s.Label, used: used, total: float64(extra.Total),
-				pct: 100 * used / float64(extra.Total),
+				path:     s.Label,
+				used:     used,
+				free:     float64(extra.Avail),
+				total:    float64(extra.Total),
+				pct:      100 * used / float64(extra.Total),
+				delta24h: deltas[s.Key],
 			})
 		}
 	}
@@ -278,9 +296,16 @@ func buildScanReport(snap api.Snapshot, st *store.Store) string {
 	if len(fss) > 0 {
 		b.WriteString("\n\n*Disk:*")
 		for _, f := range fss {
-			fmt.Fprintf(&b, "\n• `%s` %s %.0f%%  (%s / %s)",
-				f.path, usageBar(f.pct), f.pct,
-				humanBytes(int64(f.used)), humanBytes(int64(f.total)))
+			// Two lines per filesystem: header with bar + %, detail line
+			// with absolute numbers and the 24h delta. Two lines is
+			// readable in Telegram and easier to scan than a single very
+			// long line.
+			fmt.Fprintf(&b, "\n• `%s`  %s  %.0f%%", f.path, usageBar(f.pct), f.pct)
+			fmt.Fprintf(&b, "\n    used %s · free %s · total %s · %s/24h",
+				humanBytes(int64(f.used)),
+				humanBytes(int64(f.free)),
+				humanBytes(int64(f.total)),
+				signedHumanBytes(f.delta24h))
 		}
 	}
 
@@ -384,6 +409,27 @@ func buildScanReport(snap api.Snapshot, st *store.Store) string {
 		}
 	}
 	return b.String()
+}
+
+// signedHumanBytes formats a (possibly negative) byte delta with an explicit
+// arrow + sign so growth direction is obvious at a glance:
+//
+//	+125 MB   filesystem grew by 125 MB
+//	-2.0 GB   filesystem freed 2 GB
+//	±0 B      no measurable change
+//	(no data) value is unknown / first-ever scan
+//
+// Operators tracking "is the disk filling?" want this number to lean toward
+// the lower the better; the arrow makes that scannable even on small screens.
+func signedHumanBytes(b int64) string {
+	switch {
+	case b > 0:
+		return "↑ +" + humanBytes(b)
+	case b < 0:
+		return "↓ -" + humanBytes(-b)
+	default:
+		return "±0 B"
+	}
 }
 
 // usageBar returns a 10-segment unicode bar for a percentage. Used in the
