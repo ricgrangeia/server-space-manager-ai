@@ -173,15 +173,79 @@ Rules:
 }
 
 // RunDigest produces a single human-readable summary and ships it to the
-// notifier as one message. Intended for a once-daily cadence.
+// notifier as one message. Recommended schedule: every 4-6 hours. The model
+// receives a structured snapshot containing:
+//
+//   - Filesystem usage (used / free / total / 24h delta) — the disk-overview
+//     bit the operator needs to answer "how full is the box right now?"
+//     without opening the dashboard.
+//   - Top growers per kind over the last 24 hours.
+//
+// We prepend a non-LLM "Disk:" header so the operator always sees raw
+// numbers, even if the model omits or paraphrases them.
 func (r *Reviewer) RunDigest(ctx context.Context) (string, error) {
 	if r.LLM == nil {
 		return "", fmt.Errorf("llm not configured")
 	}
 	since := time.Now().Add(-24 * time.Hour)
 
+	// 24h FS deltas keyed by path so we can show direction-of-fill per
+	// filesystem in both the prompt and the deterministic header.
+	deltas := map[string]int64{}
+	if rows, err := r.Store.GrowthSince("fs", since, 100); err == nil {
+		for _, row := range rows {
+			deltas[row.Key] = row.DeltaBytes
+		}
+	}
+
+	// Build the deterministic "Disk:" header from the most recent FS samples.
+	// LatestScan returns *all* kinds of samples from the most recent scan;
+	// we filter to "fs" here.
+	type fsLine struct {
+		path     string
+		used     int64
+		avail    int64
+		total    int64
+		delta24h int64
+	}
+	var fss []fsLine
+	if samples, _, err := r.Store.LatestScan(); err == nil {
+		for _, s := range samples {
+			if s.Kind != "fs" {
+				continue
+			}
+			var extra struct {
+				Total int64 `json:"total"`
+				Avail int64 `json:"avail"`
+			}
+			if err := json.Unmarshal([]byte(s.Extra), &extra); err == nil && extra.Total > 0 {
+				fss = append(fss, fsLine{
+					path:     s.Label,
+					used:     extra.Total - extra.Avail,
+					avail:    extra.Avail,
+					total:    extra.Total,
+					delta24h: deltas[s.Key],
+				})
+			}
+		}
+	}
+
+	var header strings.Builder
+	if len(fss) > 0 {
+		header.WriteString("*Disk:*")
+		for _, f := range fss {
+			pct := 100 * float64(f.used) / float64(f.total)
+			header.WriteString(fmt.Sprintf("\n• `%s` %.0f%% — used %s · free %s · total %s · %s/24h",
+				f.path, pct, human(f.used), human(f.avail), human(f.total),
+				signedHuman(f.delta24h)))
+		}
+		header.WriteString("\n\n")
+	}
+
+	// LLM-written narrative built from per-kind growth.
 	var prompt strings.Builder
-	prompt.WriteString("Write a short daily disk-usage digest (5-8 bullet points, plain text).\n\n")
+	prompt.WriteString("Write a short ops digest (5-8 bullet points, plain text).\n")
+	prompt.WriteString("Use the data below. Don't restate the disk overview.\n\n")
 	prompt.WriteString("## 24h top growers\n")
 	wrote := false
 	for _, k := range []string{"container_log", "volume", "host_path"} {
@@ -195,20 +259,40 @@ func (r *Reviewer) RunDigest(ctx context.Context) (string, error) {
 			wrote = true
 		}
 	}
-	if !wrote {
-		return "", nil
-	}
 	prompt.WriteString("\nKeep it under 600 characters. No code fences.")
 
-	answer, err := r.LLM.Chat(ctx,
-		"You are writing a concise daily ops digest. Be factual, no hype.",
-		prompt.String())
-	if err != nil {
-		return "", err
+	// If neither header nor narrative would have content, skip the digest.
+	if !wrote && len(fss) == 0 {
+		return "", nil
 	}
-	msg := "📊 *Daily disk digest*\n" + answer
-	_ = r.Notifier.Send(ctx, "ai-digest:"+time.Now().Format("2006-01-02"), msg)
+
+	var answer string
+	if wrote {
+		got, err := r.LLM.Chat(ctx,
+			"You are writing a concise ops digest. Be factual, no hype.",
+			prompt.String())
+		if err != nil {
+			return "", err
+		}
+		answer = got
+	}
+
+	msg := "📊 *Disk digest*\n" + header.String() + answer
+	_ = r.Notifier.Send(ctx, "ai-digest:"+time.Now().Format("2006-01-02T15"), msg)
 	return answer, nil
+}
+
+// signedHuman mirrors cmd/ssm.signedHumanBytes for the digest. Kept local so
+// the aireview package has no upward dependency on the main binary.
+func signedHuman(b int64) string {
+	switch {
+	case b > 0:
+		return "↑ +" + human(b)
+	case b < 0:
+		return "↓ -" + human(-b)
+	default:
+		return "±0 B"
+	}
 }
 
 // parseFindings is lenient: it accepts either a bare JSON array or an object

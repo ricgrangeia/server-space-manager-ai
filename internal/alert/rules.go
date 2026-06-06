@@ -61,9 +61,17 @@ func Evaluate(ctx context.Context, n Notifier, r Rules, samples []store.Sample) 
 			}
 		case "container_log", "volume", "bind_mount":
 			if s.Bytes >= r.BigItemMB*1024*1024 {
+				// Recorded for the dashboard Findings card and history,
+				// but deliberately NOT sent to Telegram. These items
+				// stay above the threshold scan after scan, so pinging
+				// every hour is pure noise. The periodic AI digest
+				// already names the biggest items in context, with
+				// 24h deltas — that's the right channel for "this is
+				// still big and growing." Real changes (a new container
+				// crossing the threshold for the first time) will show
+				// up in the digest's growth list.
 				msg := fmt.Sprintf("⚠️ %s `%s` reached %s",
 					s.Kind, s.Label, humanBytes(s.Bytes))
-				_ = n.Send(ctx, s.Kind+":big:"+s.Key, msg)
 				fired = append(fired, msg)
 			}
 		case "orphan_volume":
