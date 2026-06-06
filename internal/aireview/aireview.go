@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -242,22 +243,47 @@ func (r *Reviewer) RunDigest(ctx context.Context) (string, error) {
 		header.WriteString("\n\n")
 	}
 
-	// LLM-written narrative built from per-kind growth.
-	var prompt strings.Builder
-	prompt.WriteString("Write a short ops digest (5-8 bullet points, plain text).\n")
-	prompt.WriteString("Use the data below. Don't restate the disk overview.\n\n")
-	prompt.WriteString("## 24h top growers\n")
-	wrote := false
-	for _, k := range []string{"container_log", "volume", "host_path"} {
-		rows, err := r.Store.GrowthSince(k, since, 5)
-		if err != nil || len(rows) == 0 {
+	// LLM-written narrative built from a single global "top growers" list.
+	// Earlier versions grouped by kind, which let the model reorder
+	// across groups and produce a narrative where a 100 MB grower sat
+	// above a 5 GB one. Now we merge every kind into one list, sort by
+	// 24h delta descending, and instruct the model to preserve that
+	// order — operators want to see the biggest change first.
+	type grower struct {
+		kind        string
+		label       string
+		bytes       int64
+		deltaBytes  int64
+	}
+	var growers []grower
+	for _, k := range []string{"container_log", "volume", "host_path", "bind_mount", "image"} {
+		rows, err := r.Store.GrowthSince(k, since, 10)
+		if err != nil {
 			continue
 		}
-		fmt.Fprintf(&prompt, "\n### %s\n", k)
 		for _, row := range rows {
-			fmt.Fprintf(&prompt, "- %s — now %s (+%s)\n", row.Label, human(row.Bytes), human(row.DeltaBytes))
-			wrote = true
+			if row.DeltaBytes <= 0 {
+				continue
+			}
+			growers = append(growers, grower{
+				kind: k, label: row.Label, bytes: row.Bytes, deltaBytes: row.DeltaBytes,
+			})
 		}
+	}
+	sort.Slice(growers, func(i, j int) bool { return growers[i].deltaBytes > growers[j].deltaBytes })
+	if len(growers) > 12 {
+		growers = growers[:12]
+	}
+
+	var prompt strings.Builder
+	prompt.WriteString("Write a short ops digest (5-8 bullet points, plain text).\n")
+	prompt.WriteString("Use the data below. Don't restate the disk overview.\n")
+	prompt.WriteString("IMPORTANT: keep the bullets in the SAME ORDER as the list — biggest change first.\n\n")
+	prompt.WriteString("## 24h top growers (already sorted by delta, biggest first)\n")
+	wrote := false
+	for _, g := range growers {
+		fmt.Fprintf(&prompt, "- [%s] %s — now %s (+%s)\n", g.kind, g.label, human(g.bytes), human(g.deltaBytes))
+		wrote = true
 	}
 	prompt.WriteString("\nKeep it under 600 characters. No code fences.")
 
