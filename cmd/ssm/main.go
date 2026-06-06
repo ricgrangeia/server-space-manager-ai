@@ -84,8 +84,10 @@ func main() {
 	}
 
 	var notifier alert.Notifier = noopNotifier{}
+	var tgSender *alert.Telegram // kept typed so the command bot can reuse it
 	if cfg.Telegram.Enabled && cfg.Telegram.BotToken != "" && cfg.Telegram.ChatID != "" {
-		notifier = alert.NewTelegram(cfg.Telegram.BotToken, cfg.Telegram.ChatID)
+		tgSender = alert.NewTelegram(cfg.Telegram.BotToken, cfg.Telegram.ChatID)
+		notifier = tgSender
 		log.Printf("telegram alerts enabled for chat %s", cfg.Telegram.ChatID)
 	}
 
@@ -224,6 +226,46 @@ func main() {
 		"🟢 *ssm online* — %s\nlisten %s · scan %s · ai_review %s · digest %s",
 		version.String(), cfg.HTTP.Listen,
 		cfg.Schedules.Scan, cfg.Schedules.AIReview, cfg.Schedules.Digest))
+
+	// Telegram command bot: long-poll getUpdates so the operator can run
+	// jobs from the chat the same way they would from the dashboard. The
+	// commands are registered with setMyCommands at startup so they show
+	// up as autocomplete suggestions — no need to remember names.
+	if tgSender != nil {
+		bot := alert.NewCommandBot(cfg.Telegram.BotToken, cfg.Telegram.ChatID,
+			alert.CommandHandlers{
+				OnScan: func(c context.Context) string {
+					runScan(c, cfg, st, host, dock, srv, notifier, rules)
+					return buildScanReport(srv.LastSnapshot(), st)
+				},
+				OnReview: func(c context.Context) string {
+					if reviewer.LLM == nil {
+						return "LLM disabled"
+					}
+					findings, err := reviewer.RunReview(c)
+					if err != nil {
+						return "error: " + err.Error()
+					}
+					return fmt.Sprintf("%d findings", len(findings))
+				},
+				OnDigest: func(c context.Context) string {
+					if reviewer.LLM == nil {
+						return "LLM disabled"
+					}
+					if _, err := reviewer.RunDigest(c); err != nil {
+						return "error: " + err.Error()
+					}
+					// RunDigest already pushed the full digest to chat;
+					// no need to echo it as a command reply.
+					return ""
+				},
+				OnStatus: func(c context.Context) string {
+					return buildStatusLine(srv.LastSnapshot())
+				},
+			},
+			tgSender)
+		go bot.Run(ctx)
+	}
 
 	// Kick off the first scan in the background so it doesn't block startup.
 	// Subsequent scans are driven by the cron scheduler.
@@ -430,6 +472,51 @@ func signedHumanBytes(b int64) string {
 	default:
 		return "±0 B"
 	}
+}
+
+// buildStatusLine is the response to the Telegram /status command: a quick
+// at-a-glance summary of the last scan. Designed to fit in one Telegram
+// message and answer "how full is the box right now?" without opening the
+// dashboard or waiting for the next 4h digest.
+func buildStatusLine(snap api.Snapshot) string {
+	if snap.TakenAt.IsZero() {
+		return "*Status*\nNo scan completed yet — try /scan."
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "*Status* — last scan %s\n%d samples · %d alerts",
+		snap.TakenAt.Format("2006-01-02 15:04 MST"),
+		snap.SampleCount, len(snap.Alerts))
+
+	// Quick filesystem overview (every FS, one line each).
+	type fsRow struct {
+		path  string
+		used  int64
+		avail int64
+		total int64
+	}
+	var fss []fsRow
+	for _, s := range snap.Samples {
+		if s.Kind != "fs" {
+			continue
+		}
+		var extra struct {
+			Total int64 `json:"total"`
+			Avail int64 `json:"avail"`
+		}
+		if err := json.Unmarshal([]byte(s.Extra), &extra); err == nil && extra.Total > 0 {
+			fss = append(fss, fsRow{s.Label, extra.Total - extra.Avail, extra.Avail, extra.Total})
+		}
+	}
+	sort.Slice(fss, func(i, j int) bool { return fss[i].used*fss[j].total > fss[j].used*fss[i].total })
+	if len(fss) > 0 {
+		b.WriteString("\n")
+		for _, f := range fss {
+			pct := 100 * float64(f.used) / float64(f.total)
+			fmt.Fprintf(&b, "\n• `%s` %s %.0f%% — free %s",
+				f.path, usageBar(pct), pct, humanBytes(f.avail))
+		}
+	}
+	return b.String()
 }
 
 // usageBar returns a 10-segment unicode bar for a percentage. Used in the
