@@ -68,6 +68,26 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+    # Bounded CPU + memory so a runaway scan or a bug can't starve other
+    # workloads on the host. Defaults are sized for a typical Docker host
+    # (a few hundred containers, a few TB of disk to walk). Override in
+    # the stack env if you need more or less:
+    #
+    #   SSM_CPUS=2.0          # CPU ceiling
+    #   SSM_MEMORY=1024M      # hard memory limit
+    #   SSM_CPUS_RESERVE=0.25 # guaranteed CPU floor
+    #   SSM_MEMORY_RESERVE=128M
+    #
+    # The `deploy.resources` block is honoured by both standalone compose
+    # (`docker compose up`, v1.27+) and Swarm; Portainer uses standalone.
+    deploy:
+      resources:
+        limits:
+          cpus: '${SSM_CPUS:-1.0}'
+          memory: ${SSM_MEMORY:-512M}
+        reservations:
+          cpus: '${SSM_CPUS_RESERVE:-0.25}'
+          memory: ${SSM_MEMORY_RESERVE:-128M}
 
 volumes:
   # Pin the volume to a stable absolute name (not "{project}_ssm-data") so the
