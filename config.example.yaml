@@ -10,9 +10,9 @@
 # Leave any value empty to disable that job. The AI jobs additionally require
 # llm.enabled = true; they are skipped otherwise.
 schedules:
-  scan: "@every 1h"          # disk-usage walk + Docker inspection
-  ai_review: "0 */6 * * *"   # LLM-judged anomaly review every 6 hours
-  digest: "0 */4 * * *"      # ops digest every 4 hours (disk overview + AI growth narrative)
+  scan: "@every 6h"          # disk-usage walk + Docker inspection
+  ai_review: "0 */12 * * *"   # LLM-judged anomaly review every 6 hours
+  digest: "0 */6 * * *"      # ops digest every 4 hours (disk overview + AI growth narrative)
 
 # How long to keep historical samples in SQLite. Older rows are pruned after
 # each scan. Trend/growth queries are bounded by this window.
